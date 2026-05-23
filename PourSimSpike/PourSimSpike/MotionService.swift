@@ -9,8 +9,11 @@ final class MotionService: ObservableObject {
     private let manager = CMMotionManager()
     private let queue = OperationQueue()
 
-    // Gravity strength multiplier — tune during spike testing
-    private let gravityScale: Float = 15.0
+    // Gravity strength multiplier.
+    // Down from 15 → 3 after M0 testing: real pour paint responds slowly to
+    // tilt, and the unconstrained 15× value made the sim look like wind, not
+    // honey. See docs/pour-painting-research.md §2b.
+    private let gravityScale: Float = 3.0
 
     // Simple exponential smoothing to reduce accelerometer jitter
     private var smoothed: SIMD2<Float> = .zero

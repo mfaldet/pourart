@@ -5,10 +5,14 @@ struct CanvasView: UIViewRepresentable {
 
     @ObservedObject var motion: MotionService
     @Binding var debugMode: UInt32
+    @Binding var injectColor: SIMD3<Float>
     var onFPS: (Double) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(motion: motion, debugMode: $debugMode, onFPS: onFPS)
+        Coordinator(motion: motion,
+                    debugMode: $debugMode,
+                    injectColor: $injectColor,
+                    onFPS: onFPS)
     }
 
     func makeUIView(context: Context) -> MTKView {
@@ -26,7 +30,8 @@ struct CanvasView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
-        context.coordinator.renderer?.debugMode = debugMode
+        context.coordinator.renderer?.debugMode   = debugMode
+        context.coordinator.renderer?.injectColor = injectColor
     }
 
     @MainActor
@@ -36,17 +41,22 @@ struct CanvasView: UIViewRepresentable {
         var renderer: Renderer?
         private let motion: MotionService
         @Binding var debugMode: UInt32
+        @Binding var injectColor: SIMD3<Float>
         private let onFPS: (Double) -> Void
 
         // Grid dimensions must match FluidSimulator
         private let gridW = 256
         private let gridH = 576
 
-        init(motion: MotionService, debugMode: Binding<UInt32>, onFPS: @escaping (Double) -> Void) {
-            self.device    = MTLCreateSystemDefaultDevice()!
-            self.motion    = motion
-            self._debugMode = debugMode
-            self.onFPS     = onFPS
+        init(motion: MotionService,
+             debugMode: Binding<UInt32>,
+             injectColor: Binding<SIMD3<Float>>,
+             onFPS: @escaping (Double) -> Void) {
+            self.device       = MTLCreateSystemDefaultDevice()!
+            self.motion       = motion
+            self._debugMode   = debugMode
+            self._injectColor = injectColor
+            self.onFPS        = onFPS
         }
 
         func setupRenderer(view: MTKView) {

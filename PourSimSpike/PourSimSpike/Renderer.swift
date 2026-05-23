@@ -10,6 +10,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     var gravity: SIMD2<Float> = .zero
     var pourPos: SIMD2<Float>? = nil
+    var injectColor: SIMD3<Float> = SIMD3(0.8, 0.2, 0.1)
     var debugMode: UInt32 = 0
 
     private var frameCount = 0
@@ -36,7 +37,11 @@ final class Renderer: NSObject, MTKViewDelegate {
         else { return }
 
         // Sim step
-        sim.step(gravity: gravity, pourPos: pourPos, debugMode: debugMode, commandBuffer: cmdBuf)
+        sim.step(gravity: gravity,
+                 pourPos: pourPos,
+                 injectColor: injectColor,
+                 debugMode: debugMode,
+                 commandBuffer: cmdBuf)
 
         // Render pass
         uniformsCopy.gravity    = gravity

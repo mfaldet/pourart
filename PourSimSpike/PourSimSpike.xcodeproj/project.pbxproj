@@ -19,7 +19,7 @@
 /* Begin PBXFileReference section */
 		037D72E36C502513A00BA528 /* MotionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotionService.swift; sourceTree = "<group>"; };
 		2A4CB7B28854151ADCFA4BF4 /* FluidSimulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FluidSimulator.swift; sourceTree = "<group>"; };
-		580F4DB0C5E9AD4BFAD8FE05 /* PourSimSpike.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = PourSimSpike.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		580F4DB0C5E9AD4BFAD8FE05 /* PourSimSpike.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PourSimSpike.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		685AFB157EECECC1F119B39E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		8BB9302CE10C46969CB72FED /* Shaders.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = Shaders.metal; sourceTree = "<group>"; };
 		94FE1FA9B3893A19502F9425 /* CanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanvasView.swift; sourceTree = "<group>"; };
@@ -88,8 +88,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = 9826912477056D2DC5D8889C /* Build configuration list for PBXProject "PourSimSpike" */;
 			developmentRegion = en;
@@ -133,6 +131,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 7YLKJ5CLUU;
 				INFOPLIST_FILE = PourSimSpike/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -207,6 +206,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 7YLKJ5CLUU;
 				INFOPLIST_FILE = PourSimSpike/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

@@ -1,18 +1,25 @@
 import Metal
 import CoreMotion
 
-// Matches SimUniforms in Shaders.metal — layout must stay in sync
+// Matches SimUniforms in Shaders.metal — layout must stay in sync.
+// All fields are 4-byte aligned so the natural Swift packing matches Metal.
 struct SimUniforms {
     var gravity: SIMD2<Float>   = .zero
     var dt: Float               = 1.0 / 60.0
-    var viscosity: Float        = 0.0001
+    var viscosity: Float        = 0.0008    // up from 0.0001 — paint is honey, not water
     var gridWidth: UInt32       = 256
     var gridHeight: UInt32      = 576
     var pourPosX: Float         = 0
     var pourPosY: Float         = 0
     var pourActive: UInt32      = 0
-    var pourRadius: Float       = 12
+    var pourRadius: Float       = 14
     var debugMode: UInt32       = 0
+    var injectR: Float          = 0.8
+    var injectG: Float          = 0.2
+    var injectB: Float          = 0.1
+    var damping: Float          = 0.94      // per-frame velocity multiplier
+    var surfaceTension: Float   = 0.0       // plumbed; kernel lands in a follow-up
+    var buoyancy: Float         = 4.0       // density → gravity strength
 }
 
 @MainActor
@@ -109,11 +116,15 @@ final class FluidSimulator {
 
     func step(gravity: SIMD2<Float>,
               pourPos: SIMD2<Float>?,
+              injectColor: SIMD3<Float>,
               debugMode: UInt32,
               commandBuffer: MTLCommandBuffer)
     {
         uniforms.gravity   = gravity
         uniforms.debugMode = debugMode
+        uniforms.injectR   = injectColor.x
+        uniforms.injectG   = injectColor.y
+        uniforms.injectB   = injectColor.z
         if let p = pourPos {
             uniforms.pourPosX  = p.x
             uniforms.pourPosY  = p.y
