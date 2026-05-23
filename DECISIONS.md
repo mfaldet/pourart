@@ -58,11 +58,16 @@ _2026-05-18 (spec)_
 
 ## M0 Gate Result
 
-_To be filled after spike runs on device._
+_Tested 2026-05-23 on Mac's iPhone (iPhone 13 equivalent)._
 
 | Metric | Target | Actual |
 |---|---|---|
-| FPS (iPhone 13) | 60 | — |
-| Grid size | 256×576 | — |
-| Thermal stability (10 min) | No throttle | — |
-| Verdict | Proceed / Fallback | — |
+| FPS | 60 | 60 — locked, green counter |
+| Grid size | 256×576 | 256×576 |
+| Thermal stability | No throttle in 10 min | Phone stayed cold, no throttle observed |
+| Verdict | Proceed / Fallback | **Proceed** |
+
+Debug overlays (velocity, pressure, density) all functioning correctly.
+Slow initial load (black screen ~1 min) — likely first Metal shader compilation; subsequent launches will be instant (Metal pipeline cache).
+
+**Key finding from M0:** Sim behavior is correct but far too gaseous/watery. Pour painting is a highly viscous fluid (molasses-like). Viscosity parameters, gravity scale, and diffusion need significant tuning before M1. See `docs/pour-painting-research.md` for physical properties that must be modeled.
