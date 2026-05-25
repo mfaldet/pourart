@@ -4,7 +4,7 @@ import SwiftUI
 struct PourSimSpikeApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
         }
     }
 }

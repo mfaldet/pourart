@@ -18,7 +18,7 @@ struct SimUniforms {
     var injectG: Float          = 0.2
     var injectB: Float          = 0.1
     var damping: Float          = 0.94      // per-frame velocity multiplier
-    var surfaceTension: Float   = 0.0       // plumbed; kernel lands in a follow-up
+    var surfaceTension: Float   = 0.06      // CSF cohesion — creates lacing at color boundaries
     var buoyancy: Float         = 4.0       // density → gravity strength
 }
 
@@ -52,13 +52,18 @@ final class FluidSimulator {
     private var prePing   = true
 
     // Pipelines
-    private let psAddForces:       MTLComputePipelineState
-    private let psAddSources:      MTLComputePipelineState
-    private let psAdvect:          MTLComputePipelineState
-    private let psDiffuse:         MTLComputePipelineState
-    private let psDivergence:      MTLComputePipelineState
-    private let psPressure:        MTLComputePipelineState
-    private let psSubtractGradient:MTLComputePipelineState
+    private let psAddForces:        MTLComputePipelineState
+    private let psSurfaceTension:   MTLComputePipelineState
+    private let psAddSources:       MTLComputePipelineState
+    private let psDropTool:         MTLComputePipelineState
+    private let psWipeTool:         MTLComputePipelineState
+    private let psThinnerTool:      MTLComputePipelineState
+    private let psThickenerTool:    MTLComputePipelineState
+    private let psAdvect:           MTLComputePipelineState
+    private let psDiffuse:          MTLComputePipelineState
+    private let psDivergence:       MTLComputePipelineState
+    private let psPressure:         MTLComputePipelineState
+    private let psSubtractGradient: MTLComputePipelineState
 
     private var uniforms = SimUniforms()
 
@@ -83,7 +88,12 @@ final class FluidSimulator {
         }
 
         psAddForces        = try pipeline("addForces")
+        psSurfaceTension   = try pipeline("surfaceTensionForce")
         psAddSources       = try pipeline("addSources")
+        psDropTool         = try pipeline("dropTool")
+        psWipeTool         = try pipeline("wipeTool")
+        psThinnerTool      = try pipeline("thinnerTool")
+        psThickenerTool    = try pipeline("thickenerTool")
         psAdvect           = try pipeline("advect")
         psDiffuse          = try pipeline("diffuse")
         psDivergence       = try pipeline("divergence")
@@ -114,8 +124,12 @@ final class FluidSimulator {
 
     // MARK: - Per-frame step
 
+    // pourPositions: normalized [0,1] grid coords for each active finger.
+    // activeTool: determines which kernel is dispatched per touch position.
+    // injectColor: sRGB for this frame's active palette swatch (used by pour/drop).
     func step(gravity: SIMD2<Float>,
-              pourPos: SIMD2<Float>?,
+              pourPositions: [SIMD2<Float>],
+              activeTool: Tool,
               injectColor: SIMD3<Float>,
               debugMode: UInt32,
               commandBuffer: MTLCommandBuffer)
@@ -125,13 +139,6 @@ final class FluidSimulator {
         uniforms.injectR   = injectColor.x
         uniforms.injectG   = injectColor.y
         uniforms.injectB   = injectColor.z
-        if let p = pourPos {
-            uniforms.pourPosX  = p.x
-            uniforms.pourPosY  = p.y
-            uniforms.pourActive = 1
-        } else {
-            uniforms.pourActive = 0
-        }
 
         let tg = MTLSize(width: 16, height: 16, depth: 1)
         let gc = MTLSize(width: (gridWidth  + 15) / 16,
@@ -151,17 +158,50 @@ final class FluidSimulator {
         let curDen = denPing ? densityA : densityB
         let curCol = colorPing ? colorA : colorB
 
-        // 1. Add forces
+        // 1. Add forces (gravity + damping)
         encode(psAddForces) { enc in
             enc.setTexture(curVel, index: 0)
             enc.setTexture(curDen, index: 1)
         }
 
-        // 2. Add sources
-        encode(psAddSources) { enc in
-            enc.setTexture(curCol, index: 0)
+        // 2. Surface tension — cohesive force at density interfaces
+        encode(psSurfaceTension) { enc in
+            enc.setTexture(curVel, index: 0)
             enc.setTexture(curDen, index: 1)
-            enc.setTexture(curVel, index: 2)
+        }
+
+        // 3. Apply active tool — one dispatch per active finger.
+        // pourRadius is set per-tool so each tool has its natural effect area.
+        uniforms.pourRadius = activeTool.radius
+        let toolPipeline: MTLComputePipelineState = {
+            switch activeTool {
+            case .pour:      return psAddSources
+            case .drop:      return psDropTool
+            case .wipe:      return psWipeTool
+            case .thinner:   return psThinnerTool
+            case .thickener: return psThickenerTool
+            }
+        }()
+
+        if pourPositions.isEmpty {
+            uniforms.pourActive = 0
+            // One no-op encode keeps the pipeline consistent (uniforms still pushed).
+            encode(toolPipeline) { enc in
+                enc.setTexture(curCol, index: 0)
+                enc.setTexture(curDen, index: 1)
+                enc.setTexture(curVel, index: 2)
+            }
+        } else {
+            for pos in pourPositions {
+                uniforms.pourPosX   = pos.x
+                uniforms.pourPosY   = pos.y
+                uniforms.pourActive = 1
+                encode(toolPipeline) { enc in
+                    enc.setTexture(curCol, index: 0)
+                    enc.setTexture(curDen, index: 1)
+                    enc.setTexture(curVel, index: 2)
+                }
+            }
         }
 
         // 3. Advect velocity

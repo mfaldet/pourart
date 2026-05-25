@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AA000001000000000000AA01 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA000001000000000000AA00 /* Assets.xcassets */; };
+		AA000002000000000000AA01 /* PaletteModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000002000000000000AA00 /* PaletteModel.swift */; };
+		AA000003000000000000AA01 /* PreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000003000000000000AA00 /* PreviewView.swift */; };
 		3F931C8B63F6EB878FB943D1 /* MotionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 037D72E36C502513A00BA528 /* MotionService.swift */; };
 		9B959009038950FD9869BF53 /* FluidSimulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A4CB7B28854151ADCFA4BF4 /* FluidSimulator.swift */; };
 		A1B64646D31074EAB5B62EDF /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D24C739A9C03118E2648080A /* ContentView.swift */; };
@@ -26,6 +29,9 @@
 		96099F87EC7A1693416788EB /* Renderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Renderer.swift; sourceTree = "<group>"; };
 		D24C739A9C03118E2648080A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		D84DA38B063DB0F0F4EB5D11 /* PourSimSpikeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PourSimSpikeApp.swift; sourceTree = "<group>"; };
+		AA000001000000000000AA00 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		AA000002000000000000AA00 /* PaletteModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteModel.swift; sourceTree = "<group>"; };
+		AA000003000000000000AA00 /* PreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -40,7 +46,10 @@
 		709748AE5BEE47BD58EB63E5 /* PourSimSpike */ = {
 			isa = PBXGroup;
 			children = (
+				AA000001000000000000AA00 /* Assets.xcassets */,
 				94FE1FA9B3893A19502F9425 /* CanvasView.swift */,
+				AA000002000000000000AA00 /* PaletteModel.swift */,
+				AA000003000000000000AA00 /* PreviewView.swift */,
 				D24C739A9C03118E2648080A /* ContentView.swift */,
 				2A4CB7B28854151ADCFA4BF4 /* FluidSimulator.swift */,
 				685AFB157EECECC1F119B39E /* Info.plist */,
@@ -67,6 +76,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = AECF232F8B6086F3932CF7E2 /* Build configuration list for PBXNativeTarget "PourSimSpike" */;
 			buildPhases = (
+				AA000001000000000000AA02 /* Resources */,
 				979ECFD178AAB590B8EBB089 /* Sources */,
 			);
 			buildRules = (
@@ -108,6 +118,17 @@
 		};
 /* End PBXProject section */
 
+/* Begin PBXResourcesBuildPhase section */
+		AA000001000000000000AA02 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA000001000000000000AA01 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		979ECFD178AAB590B8EBB089 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -117,6 +138,8 @@
 				A1B64646D31074EAB5B62EDF /* ContentView.swift in Sources */,
 				9B959009038950FD9869BF53 /* FluidSimulator.swift in Sources */,
 				3F931C8B63F6EB878FB943D1 /* MotionService.swift in Sources */,
+				AA000002000000000000AA01 /* PaletteModel.swift in Sources */,
+				AA000003000000000000AA01 /* PreviewView.swift in Sources */,
 				D5E52D8C9F1B8EBF3BCC76A3 /* PourSimSpikeApp.swift in Sources */,
 				A2F0E656207918BF8369CF9A /* Renderer.swift in Sources */,
 				FD19302C0E6C9CB75E803364 /* Shaders.metal in Sources */,

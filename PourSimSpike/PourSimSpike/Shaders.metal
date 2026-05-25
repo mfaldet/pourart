@@ -98,7 +98,62 @@ kernel void addForces(texture2d<float, access::read_write> velocity [[texture(0)
 }
 
 // ---------------------------------------------------------------------------
-// 2. Add sources — inject palette color (converted to Oklab) at pour point
+// 2. Surface tension — Continuum Surface Force (CSF) method
+//
+// Pour paint has high surface tension relative to its viscosity. This creates:
+//   • Cohesion: paint regions resist breaking apart into thin films
+//   • Lacing: curved, minimized boundaries between color zones
+//   • Beading: dense paint pools rather than spreading uniformly
+//
+// Algorithm: F_st = σ · (∇²ρ) · ∇ρ
+//   ∇ρ  = density gradient (zero in flat regions, large at interfaces)
+//   ∇²ρ = Laplacian of density (curvature of the density field)
+//
+// Weighting by ∇ρ (not normalized) naturally concentrates the force at
+// density interfaces and zeroes it out in flat paint regions. The sign of
+// the Laplacian makes the force cohesive: at the edge of a paint blob the
+// Laplacian is negative, so F points inward, pulling the blob together.
+// ---------------------------------------------------------------------------
+kernel void surfaceTensionForce(
+    texture2d<float, access::read_write> velocity [[texture(0)]],
+    texture2d<float, access::read>       density  [[texture(1)]],
+    constant SimUniforms& u                       [[buffer(0)]],
+    uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+    if (u.surfaceTension == 0.0f) return;
+
+    uint2 l  = uint2(max((int)gid.x - 1, 0),               gid.y);
+    uint2 r  = uint2(min(gid.x + 1, u.gridSize.x - 1),     gid.y);
+    uint2 dn = uint2(gid.x, max((int)gid.y - 1, 0));
+    uint2 up = uint2(gid.x, min(gid.y + 1, u.gridSize.y - 1));
+
+    float rho  = density.read(gid).r;
+    float rhoL = density.read(l).r;
+    float rhoR = density.read(r).r;
+    float rhoD = density.read(dn).r;
+    float rhoU = density.read(up).r;
+
+    float2 grad     = float2(rhoR - rhoL, rhoU - rhoD) * 0.5f;
+    float  gradLen  = length(grad);
+    if (gradLen < 1e-5f) return;   // flat region — no interface, no force
+
+    float laplacian = rhoL + rhoR + rhoD + rhoU - 4.0f * rho;
+
+    // CSF force: proportional to curvature × gradient magnitude
+    float2 stForce = u.surfaceTension * laplacian * grad;
+
+    float4 vel = velocity.read(gid);
+    vel.xy += stForce * u.dt;
+
+    float speed = length(vel.xy);
+    if (speed > 50.0f) vel.xy = normalize(vel.xy) * 50.0f;
+
+    velocity.write(vel, gid);
+}
+
+// ---------------------------------------------------------------------------
+// 3. Add sources — inject palette color (converted to Oklab) at pour point
 // ---------------------------------------------------------------------------
 kernel void addSources(texture2d<float, access::read_write> color   [[texture(0)]],
                        texture2d<float, access::read_write> density [[texture(1)]],
@@ -142,7 +197,148 @@ kernel void addSources(texture2d<float, access::read_write> color   [[texture(0)
 }
 
 // ---------------------------------------------------------------------------
-// 3. Advect — semi-Lagrangian backtrace for any float4 field
+// Tool kernels — Drop, Wipe, Thinner, Thickener
+//
+// All share the same texture signature as addSources (color, density, velocity)
+// so FluidSimulator can dispatch them identically. Each only writes the fields
+// it actually changes.
+//
+// pourPos / pourRadius / pourActive in the uniforms carry the tool position and
+// active flag for all tools — the semantics are the same, only the effect differs.
+// ---------------------------------------------------------------------------
+
+// Drop — injects a high-density paint blob that acts like a silicone-oil droplet.
+// The 3× density overshoot creates a buoyancy mismatch with surrounding paint;
+// the buoyancy term in addForces then drives it to rise or sink, triggering
+// Rayleigh-Taylor instability and cell formation at the boundaries.
+kernel void dropTool(texture2d<float, access::read_write> color    [[texture(0)]],
+                     texture2d<float, access::read_write> density  [[texture(1)]],
+                     texture2d<float, access::read_write> velocity [[texture(2)]],
+                     constant SimUniforms& u                       [[buffer(0)]],
+                     uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (!u.pourActive) return;
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+
+    float2 cellPos  = float2(gid);
+    float2 dropCell = u.pourPos * float2(u.gridSize);
+    float  dist     = length(cellPos - dropCell);
+    if (dist >= u.pourRadius) return;
+
+    float t        = 1.0f - dist / u.pourRadius;
+    float strength = clamp(t * t * u.dt * 14.0f, 0.0f, 1.0f);
+
+    // Full color replacement — the drop has a definite color.
+    float3 injectLab = rgbToOklab(float3(u.injectR, u.injectG, u.injectB));
+    float4 cur = color.read(gid);
+    float  blendW = strength / max(cur.w + strength, 1e-4f);
+    color.write(float4(mix(cur.xyz, injectLab, blendW),
+                       clamp(cur.w + strength, 0.0f, 1.0f)), gid);
+
+    // 3× density overshoot — critical for cell seeding.
+    float curDen = density.read(gid).r;
+    density.write(float4(clamp(curDen + strength * 3.0f, 0.0f, 3.0f)), gid);
+
+    // Radially outward impulse — perturbs the interface to seed instability.
+    float2 dir = (dist > 0.5f) ? normalize(cellPos - dropCell) : float2(0.0f, 1.0f);
+    float4 vel = velocity.read(gid);
+    vel.xy += dir * strength * 6.0f;
+    float spd = length(vel.xy);
+    if (spd > 50.0f) vel.xy = normalize(vel.xy) * 50.0f;
+    velocity.write(vel, gid);
+}
+
+// Wipe — gradually erodes color opacity and density in the tool radius.
+// Gradual rather than instant so a slow drag creates a smooth smear effect.
+kernel void wipeTool(texture2d<float, access::read_write> color    [[texture(0)]],
+                     texture2d<float, access::read_write> density  [[texture(1)]],
+                     texture2d<float, access::read_write> velocity [[texture(2)]],
+                     constant SimUniforms& u                       [[buffer(0)]],
+                     uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (!u.pourActive) return;
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+
+    float2 cellPos   = float2(gid);
+    float2 wipeCell  = u.pourPos * float2(u.gridSize);
+    float  dist      = length(cellPos - wipeCell);
+    if (dist >= u.pourRadius) return;
+
+    float t       = 1.0f - dist / u.pourRadius;
+    float wipeStr = clamp(t * t * u.dt * 6.0f, 0.0f, 1.0f);
+
+    float4 cur = color.read(gid);
+    float newOpacity = clamp(cur.w - wipeStr, 0.0f, 1.0f);
+    color.write(float4(cur.xyz, newOpacity), gid);
+
+    float curDen = density.read(gid).r;
+    density.write(float4(clamp(curDen - wipeStr, 0.0f, 1.0f)), gid);
+
+    float4 vel = velocity.read(gid);
+    vel.xy *= max(1.0f - wipeStr * 0.6f, 0.0f);
+    velocity.write(vel, gid);
+}
+
+// Thinner — removes density and injects a radially outward velocity impulse.
+// Lower density = less buoyancy loading = paint responds faster to tilt.
+// The outward impulse makes it visibly spread, like solvent hitting wet paint.
+kernel void thinnerTool(texture2d<float, access::read_write> color    [[texture(0)]],
+                        texture2d<float, access::read_write> density  [[texture(1)]],
+                        texture2d<float, access::read_write> velocity [[texture(2)]],
+                        constant SimUniforms& u                       [[buffer(0)]],
+                        uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (!u.pourActive) return;
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+
+    float2 cellPos  = float2(gid);
+    float2 toolCell = u.pourPos * float2(u.gridSize);
+    float  dist     = length(cellPos - toolCell);
+    if (dist >= u.pourRadius) return;
+
+    float t        = 1.0f - dist / u.pourRadius;
+    float strength = t * u.dt * 4.0f;
+
+    float curDen = density.read(gid).r;
+    density.write(float4(clamp(curDen - strength * 0.6f, 0.0f, 1.0f)), gid);
+
+    float2 dir = (dist > 0.5f) ? normalize(cellPos - toolCell) : float2(1.0f, 0.0f);
+    float4 vel = velocity.read(gid);
+    vel.xy += dir * strength * 5.0f;
+    float spd = length(vel.xy);
+    if (spd > 50.0f) vel.xy = normalize(vel.xy) * 50.0f;
+    velocity.write(vel, gid);
+}
+
+// Thickener — adds density and dampens velocity.
+// Higher density = more gravity loading, slower response, paint pools in place.
+kernel void thickenerTool(texture2d<float, access::read_write> color    [[texture(0)]],
+                          texture2d<float, access::read_write> density  [[texture(1)]],
+                          texture2d<float, access::read_write> velocity [[texture(2)]],
+                          constant SimUniforms& u                       [[buffer(0)]],
+                          uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (!u.pourActive) return;
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+
+    float2 cellPos  = float2(gid);
+    float2 toolCell = u.pourPos * float2(u.gridSize);
+    float  dist     = length(cellPos - toolCell);
+    if (dist >= u.pourRadius) return;
+
+    float t        = 1.0f - dist / u.pourRadius;
+    float strength = t * u.dt * 4.0f;
+
+    float curDen = density.read(gid).r;
+    density.write(float4(clamp(curDen + strength * 0.8f, 0.0f, 1.5f)), gid);
+
+    float4 vel = velocity.read(gid);
+    vel.xy *= max(1.0f - strength * 0.5f, 0.0f);
+    velocity.write(vel, gid);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Advect — semi-Lagrangian backtrace for any float4 field
 // ---------------------------------------------------------------------------
 kernel void advect(texture2d<float, access::read>        velocity [[texture(0)]],
                    texture2d<float, access::sample>      fieldIn  [[texture(1)]],
