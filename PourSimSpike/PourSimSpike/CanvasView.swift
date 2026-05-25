@@ -6,7 +6,14 @@ import MetalKit
 // location at a time; UITouch gives the full set.
 final class TouchMTKView: MTKView {
 
-    var onTouchesChanged: (([SIMD2<Float>]) -> Void)?
+    var onTouchesChanged: (([PourTouch]) -> Void)?
+
+    // Radius grows from minPourRadius → maxPourRadius over pourGrowSeconds.
+    private let minPourRadius: Float  = 8
+    private let maxPourRadius: Float  = 40
+    private let pourGrowSeconds: Double = 3.0
+
+    private var touchStartTimes: [ObjectIdentifier: CFTimeInterval] = [:]
 
     override init(frame: CGRect, device: (any MTLDevice)?) {
         super.init(frame: frame, device: device)
@@ -16,42 +23,54 @@ final class TouchMTKView: MTKView {
     required init(coder: NSCoder) { fatalError() }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let now = CACurrentMediaTime()
+        for t in touches { touchStartTimes[ObjectIdentifier(t)] = now }
         report(event)
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         report(event)
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        for t in touches { touchStartTimes.removeValue(forKey: ObjectIdentifier(t)) }
         report(event)
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        touchStartTimes.removeAll()
         onTouchesChanged?([])
     }
 
     private func report(_ event: UIEvent?) {
         guard let all = event?.allTouches else { onTouchesChanged?([]); return }
+        let now = CACurrentMediaTime()
         let active = all.filter { $0.phase != .ended && $0.phase != .cancelled }
-        let positions = active.map { touch -> SIMD2<Float> in
-            let pt = touch.location(in: self)
-            // Screen-space Y is top-down; Metal/grid Y is bottom-up — flip.
-            return SIMD2<Float>(Float(pt.x / bounds.width),
-                                1.0 - Float(pt.y / bounds.height))
+        let result = active.map { touch -> PourTouch in
+            let pt      = touch.location(in: self)
+            let pos     = SIMD2<Float>(Float(pt.x / bounds.width),
+                                      1.0 - Float(pt.y / bounds.height))
+            let start   = touchStartTimes[ObjectIdentifier(touch)] ?? now
+            let elapsed = Float(min((now - start) / pourGrowSeconds, 1.0))
+            let radius  = minPourRadius + (maxPourRadius - minPourRadius) * elapsed
+            return PourTouch(pos: pos, radius: radius)
         }
-        onTouchesChanged?(positions)
+        onTouchesChanged?(result)
     }
+}
+
+struct PourTouch {
+    let pos:    SIMD2<Float>
+    let radius: Float
 }
 
 struct CanvasView: UIViewRepresentable {
 
     @ObservedObject var motion: MotionService
-    @Binding var debugMode: UInt32
     var injectColor: SIMD3<Float>       // plain value — owned by PaletteStore
     @Binding var activeTool: Tool
     var onFPS: (Double) -> Void
     var onRendererReady: ((Renderer) -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(motion: motion, debugMode: $debugMode, activeTool: $activeTool, onFPS: onFPS)
+        Coordinator(motion: motion, activeTool: $activeTool, onFPS: onFPS)
     }
 
     func makeUIView(context: Context) -> TouchMTKView {
@@ -64,8 +83,8 @@ struct CanvasView: UIViewRepresentable {
 
         context.coordinator.setupRenderer(view: view, onRendererReady: onRendererReady)
 
-        view.onTouchesChanged = { [weak coord = context.coordinator] positions in
-            coord?.renderer?.pourPositions = positions
+        view.onTouchesChanged = { [weak coord = context.coordinator] touches in
+            coord?.renderer?.pourTouches = touches
             coord?.renderer?.gravity = coord?.motion.gravity ?? .zero
         }
 
@@ -73,7 +92,6 @@ struct CanvasView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: TouchMTKView, context: Context) {
-        context.coordinator.renderer?.debugMode   = debugMode
         context.coordinator.renderer?.injectColor = injectColor
         context.coordinator.renderer?.activeTool  = activeTool
     }
@@ -84,7 +102,6 @@ struct CanvasView: UIViewRepresentable {
         let device: MTLDevice
         var renderer: Renderer?
         let motion: MotionService
-        @Binding var debugMode: UInt32
         @Binding var activeTool: Tool
         private let onFPS: (Double) -> Void
 
@@ -92,12 +109,10 @@ struct CanvasView: UIViewRepresentable {
         private let gridH = 576
 
         init(motion: MotionService,
-             debugMode: Binding<UInt32>,
              activeTool: Binding<Tool>,
              onFPS: @escaping (Double) -> Void) {
             self.device      = MTLCreateSystemDefaultDevice()!
             self.motion      = motion
-            self._debugMode  = debugMode
             self._activeTool = activeTool
             self.onFPS       = onFPS
         }

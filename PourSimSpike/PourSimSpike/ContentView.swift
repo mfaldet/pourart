@@ -1,4 +1,5 @@
 import SwiftUI
+import simd
 
 // ---------------------------------------------------------------------------
 // Tool model — module-level so FluidSimulator, Renderer, and CanvasView see it.
@@ -46,22 +47,21 @@ enum Tool: String, CaseIterable, Identifiable {
 // ---------------------------------------------------------------------------
 struct RootView: View {
     @StateObject private var paletteStore = PaletteStore()
-    @State private var isCanvasActive     = false
-    @State private var showPalettePicker  = false
+    @State private var showFlow    = false
+    @State private var showGallery = false
 
     var body: some View {
-        if isCanvasActive {
-            CanvasContainerView(paletteStore: paletteStore,
-                                onExit: { isCanvasActive = false })
-        } else {
-            HomeView(paletteStore: paletteStore,
-                     showPalettePicker: $showPalettePicker,
-                     onNewPour: { isCanvasActive = true })
-                .sheet(isPresented: $showPalettePicker) {
-                    PalettePickerView(store: paletteStore,
-                                      onSelect: { isCanvasActive = true })
-                }
-        }
+        HomeView(paletteStore: paletteStore,
+                 onNewPour:  { showFlow    = true },
+                 onMyArt:    { showGallery = true })
+            .fullScreenCover(isPresented: $showFlow) {
+                PourFlowView(paletteStore: paletteStore,
+                             onDone: { showFlow = false })
+            }
+            .sheet(isPresented: $showGallery) {
+                GalleryView()
+                    .presentationDetents([.large])
+            }
     }
 }
 
@@ -70,8 +70,8 @@ struct RootView: View {
 // ---------------------------------------------------------------------------
 struct HomeView: View {
     @ObservedObject var paletteStore: PaletteStore
-    @Binding var showPalettePicker: Bool
     var onNewPour: () -> Void
+    var onMyArt:   () -> Void
 
     var body: some View {
         ZStack {
@@ -87,31 +87,30 @@ struct HomeView: View {
                         .foregroundStyle(.white)
                     Text("A real fluid painting simulator")
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.5))
+                        .foregroundStyle(.white.opacity(0.45))
                 }
 
-                // Active palette preview
+                // Last-used palette preview
                 HStack(spacing: 10) {
                     ForEach(paletteStore.activePalette.colors) { color in
                         Circle()
                             .fill(color.displayColor)
-                            .frame(width: 34, height: 34)
+                            .frame(width: 32, height: 32)
+                            .overlay(Circle().stroke(.white.opacity(0.15), lineWidth: 1))
                     }
                 }
                 .padding(.top, 40)
 
                 Text(paletteStore.activePalette.name)
                     .font(.caption)
-                    .foregroundStyle(.white.opacity(0.4))
-                    .padding(.top, 8)
+                    .foregroundStyle(.white.opacity(0.35))
+                    .padding(.top, 6)
 
                 Spacer()
 
                 // Actions
                 VStack(spacing: 14) {
-                    Button {
-                        onNewPour()
-                    } label: {
+                    Button(action: onNewPour) {
                         Label("New Pour", systemImage: "drop.fill")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
@@ -121,10 +120,8 @@ struct HomeView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 16))
                     }
 
-                    Button {
-                        showPalettePicker = true
-                    } label: {
-                        Label("Choose Palette", systemImage: "paintpalette.fill")
+                    Button(action: onMyArt) {
+                        Label("See My Art", systemImage: "photo.on.rectangle.angled")
                             .font(.subheadline)
                             .frame(maxWidth: .infinity)
                             .padding()
@@ -146,10 +143,10 @@ struct HomeView: View {
 struct CanvasContainerView: View {
 
     @ObservedObject var paletteStore: PaletteStore
+    var consistency: Float = 0   // -1 (thin) … +1 (thick), averaged from PaintSetupView
     var onExit: () -> Void
 
     @StateObject private var motion = MotionService()
-    @State private var debugMode: UInt32      = 0
     @State private var fps: Double            = 0
     @State private var activeTool: Tool       = .pour
     @State private var showPalettePicker      = false
@@ -161,11 +158,14 @@ struct CanvasContainerView: View {
     var body: some View {
         ZStack {
             CanvasView(motion: motion,
-                       debugMode: $debugMode,
                        injectColor: paletteStore.activeColor,
                        activeTool: $activeTool,
                        onFPS: { fps in self.fps = fps },
-                       onRendererReady: { r in self.renderer = r })
+                       onRendererReady: { r in
+                           self.renderer = r
+                           r.fillBase(rgb: paletteStore.baseColor)
+                           r.applyConsistency(consistency)
+                       })
             .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -246,15 +246,7 @@ struct CanvasContainerView: View {
                 Spacer()
 
                 ToolbarView(activeTool: $activeTool)
-
-                HStack(spacing: 8) {
-                    debugButton("Off",      mode: 0)
-                    debugButton("Velocity", mode: 1)
-                    debugButton("Pressure", mode: 2)
-                    debugButton("Density",  mode: 3)
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 40)
+                    .padding(.bottom, 40)
             }
             .animation(.easeInOut(duration: 0.2), value: activeTool)
         }
@@ -300,15 +292,6 @@ struct CanvasContainerView: View {
         }
     }
 
-    private func debugButton(_ label: String, mode: UInt32) -> some View {
-        Button(label) { debugMode = mode }
-            .font(.system(.caption, design: .monospaced))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(debugMode == mode ? Color.accentColor : .black.opacity(0.5))
-            .foregroundStyle(.white)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-    }
 }
 
 // Identifiable wrapper so .sheet(item:) works with Int.
@@ -321,6 +304,32 @@ private struct ColorEditTarget: Identifiable {
 private struct FinishedPainting: Identifiable {
     let image: UIImage
     let id = UUID()
+}
+
+// ---------------------------------------------------------------------------
+// BaseColorPickerButton — custom circle that opens the system ColorPicker
+// ---------------------------------------------------------------------------
+struct BaseColorPickerButton: View {
+    @ObservedObject var store: PaletteStore
+    @State private var pickedColor: Color
+
+    init(store: PaletteStore) {
+        self.store = store
+        let rgb = store.baseColor
+        _pickedColor = State(initialValue:
+            Color(red: Double(rgb.x), green: Double(rgb.y), blue: Double(rgb.z)))
+    }
+
+    var body: some View {
+        ColorPicker("", selection: $pickedColor, supportsOpacity: false)
+            .labelsHidden()
+            .frame(width: 36, height: 36)
+            .onChange(of: pickedColor) { _, newColor in
+                if let comps = UIColor(newColor).cgColor.components, comps.count >= 3 {
+                    store.setBaseColor(SIMD3(Float(comps[0]), Float(comps[1]), Float(comps[2])))
+                }
+            }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,7 +461,7 @@ struct PaletteRowView: View {
 
             if isSelected {
                 Image(systemName: "checkmark")
-                    .foregroundStyle(.accentColor)
+                    .foregroundStyle(Color.accentColor)
                     .padding(.leading, 4)
             }
         }

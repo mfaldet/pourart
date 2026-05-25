@@ -52,6 +52,7 @@ final class FluidSimulator {
     private var prePing   = true
 
     // Pipelines
+    private let psFillCanvas:       MTLComputePipelineState
     private let psAddForces:        MTLComputePipelineState
     private let psSurfaceTension:   MTLComputePipelineState
     private let psAddSources:       MTLComputePipelineState
@@ -87,6 +88,7 @@ final class FluidSimulator {
             return try device.makeComputePipelineState(function: fn)
         }
 
+        psFillCanvas       = try pipeline("fillCanvas")
         psAddForces        = try pipeline("addForces")
         psSurfaceTension   = try pipeline("surfaceTensionForce")
         psAddSources       = try pipeline("addSources")
@@ -122,13 +124,49 @@ final class FluidSimulator {
         uniforms.gridHeight = UInt32(height)
     }
 
+    // Adjust viscosity and damping from a consistency value (-1=thin … +1=thick).
+    func applyConsistency(_ value: Float) {
+        let clamped = max(-1, min(1, value))
+        uniforms.damping    = 0.94 - clamped * 0.04   // thin: 0.98 · thick: 0.90
+        uniforms.viscosity  = 0.0008 * pow(3.0, Double(clamped)) // thin: ~0.00027 · thick: ~0.0024
+    }
+
+    // Fill every grid cell with a solid base color.  Call once before the first frame.
+    func fillBase(rgb: SIMD3<Float>) {
+        var u = uniforms
+        u.injectR = rgb.x; u.injectG = rgb.y; u.injectB = rgb.z
+
+        guard let cmdBuf = commandQueue.makeCommandBuffer() else { return }
+
+        let tg = MTLSize(width: 16, height: 16, depth: 1)
+        let gc = MTLSize(width: (gridWidth  + 15) / 16,
+                         height: (gridHeight + 15) / 16,
+                         depth: 1)
+
+        func fill(col: MTLTexture, den: MTLTexture) {
+            guard let enc = cmdBuf.makeComputeCommandEncoder() else { return }
+            enc.setComputePipelineState(psFillCanvas)
+            enc.setBytes(&u, length: MemoryLayout<SimUniforms>.stride, index: 0)
+            enc.setTexture(col, index: 0)
+            enc.setTexture(den, index: 1)
+            enc.dispatchThreadgroups(gc, threadsPerThreadgroup: tg)
+            enc.endEncoding()
+        }
+
+        fill(col: colorA, den: densityA)
+        fill(col: colorB, den: densityB)
+
+        cmdBuf.commit()
+        cmdBuf.waitUntilCompleted()
+    }
+
     // MARK: - Per-frame step
 
     // pourPositions: normalized [0,1] grid coords for each active finger.
     // activeTool: determines which kernel is dispatched per touch position.
     // injectColor: sRGB for this frame's active palette swatch (used by pour/drop).
     func step(gravity: SIMD2<Float>,
-              pourPositions: [SIMD2<Float>],
+              pourTouches: [PourTouch],
               activeTool: Tool,
               injectColor: SIMD3<Float>,
               debugMode: UInt32,
@@ -171,8 +209,7 @@ final class FluidSimulator {
         }
 
         // 3. Apply active tool — one dispatch per active finger.
-        // pourRadius is set per-tool so each tool has its natural effect area.
-        uniforms.pourRadius = activeTool.radius
+        // Pour uses a per-touch growing radius; other tools use their fixed radius.
         let toolPipeline: MTLComputePipelineState = {
             switch activeTool {
             case .pour:      return psAddSources
@@ -183,19 +220,20 @@ final class FluidSimulator {
             }
         }()
 
-        if pourPositions.isEmpty {
+        if pourTouches.isEmpty {
             uniforms.pourActive = 0
-            // One no-op encode keeps the pipeline consistent (uniforms still pushed).
+            uniforms.pourRadius = activeTool.radius
             encode(toolPipeline) { enc in
                 enc.setTexture(curCol, index: 0)
                 enc.setTexture(curDen, index: 1)
                 enc.setTexture(curVel, index: 2)
             }
         } else {
-            for pos in pourPositions {
-                uniforms.pourPosX   = pos.x
-                uniforms.pourPosY   = pos.y
+            for touch in pourTouches {
+                uniforms.pourPosX   = touch.pos.x
+                uniforms.pourPosY   = touch.pos.y
                 uniforms.pourActive = 1
+                uniforms.pourRadius = activeTool == .pour ? touch.radius : activeTool.radius
                 encode(toolPipeline) { enc in
                     enc.setTexture(curCol, index: 0)
                     enc.setTexture(curDen, index: 1)

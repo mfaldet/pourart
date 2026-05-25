@@ -9,9 +9,8 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var uniformsCopy: SimUniforms = SimUniforms()
 
     var gravity: SIMD2<Float> = .zero
-    var pourPositions: [SIMD2<Float>] = []
+    var pourTouches: [PourTouch] = []
     var injectColor: SIMD3<Float> = SIMD3(0.8, 0.2, 0.1)
-    var debugMode: UInt32 = 0
     var activeTool: Tool = .pour
 
     private var frameCount = 0
@@ -28,6 +27,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         desc.colorAttachments[0].pixelFormat = view.colorPixelFormat
         renderPipeline = try sim.device.makeRenderPipelineState(descriptor: desc)
     }
+
+    func fillBase(rgb: SIMD3<Float>)        { sim.fillBase(rgb: rgb) }
+    func applyConsistency(_ value: Float)  { sim.applyConsistency(value) }
 
     private(set) var drawableSize: CGSize = .zero
 
@@ -108,16 +110,16 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // Sim step
         sim.step(gravity: gravity,
-                 pourPositions: pourPositions,
+                 pourTouches: pourTouches,
                  activeTool: activeTool,
                  injectColor: injectColor,
-                 debugMode: debugMode,
+                 debugMode: 0,
                  commandBuffer: cmdBuf)
 
         // Render pass
         uniformsCopy.gravity    = gravity
-        uniformsCopy.pourActive = pourPositions.isEmpty ? 0 : 1
-        uniformsCopy.debugMode  = debugMode
+        uniformsCopy.pourActive = pourTouches.isEmpty ? 0 : 1
+        uniformsCopy.debugMode  = 0
         uniformsCopy.gridWidth  = UInt32(sim.gridWidth)
         uniformsCopy.gridHeight = UInt32(sim.gridHeight)
 

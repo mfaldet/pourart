@@ -169,8 +169,10 @@ kernel void addSources(texture2d<float, access::read_write> color   [[texture(0)
     float  dist     = length(cellPos - pourCell);
     if (dist >= u.pourRadius) return;
 
-    float strength = (1.0 - dist / u.pourRadius) * u.dt * 8.0;
-    strength = clamp(strength, 0.0, 1.0);
+    // Quadratic falloff: center is fully opaque immediately, edges taper.
+    // No dt scaling — pour should deposit solid color in a single frame.
+    float t = 1.0 - dist / u.pourRadius;
+    float strength = clamp(t * t, 0.0, 1.0);
 
     // Convert palette RGB → Oklab for perceptual mixing in the grid.
     float3 injectLab = rgbToOklab(float3(u.injectR, u.injectG, u.injectB));
@@ -340,6 +342,21 @@ kernel void thickenerTool(texture2d<float, access::read_write> color    [[textur
 // ---------------------------------------------------------------------------
 // 4. Advect — semi-Lagrangian backtrace for any float4 field
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// fillCanvas — flood-fill the entire grid with a solid base color.
+// Called once at canvas init; uses injectR/G/B from uniforms as the base color.
+// ---------------------------------------------------------------------------
+kernel void fillCanvas(texture2d<float, access::write> color   [[texture(0)]],
+                       texture2d<float, access::write> density [[texture(1)]],
+                       constant SimUniforms& u                  [[buffer(0)]],
+                       uint2 gid                               [[thread_position_in_grid]])
+{
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+    float3 lab = rgbToOklab(float3(u.injectR, u.injectG, u.injectB));
+    color.write(float4(lab, 1.0), gid);
+    density.write(float4(1.0, 0.0, 0.0, 0.0), gid);
+}
+
 kernel void advect(texture2d<float, access::read>        velocity [[texture(0)]],
                    texture2d<float, access::sample>      fieldIn  [[texture(1)]],
                    texture2d<float, access::write>       fieldOut [[texture(2)]],

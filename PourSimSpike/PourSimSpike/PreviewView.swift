@@ -172,14 +172,16 @@ struct PreviewView: View {
 
     private func saveToPhotos() {
         guard let composite = renderComposite() else { return }
+        // Always save to in-app gallery first (no permission needed).
+        PaintingStore.save(composite)
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             DispatchQueue.main.async {
                 if status == .authorized || status == .limited {
                     UIImageWriteToSavedPhotosAlbum(composite, nil, nil, nil)
-                    saveAlert = SaveAlert(title: "Saved!", message: "Your painting was added to Photos.")
+                    saveAlert = SaveAlert(title: "Saved!", message: "Saved to your gallery and Photos.")
                 } else {
-                    saveAlert = SaveAlert(title: "Permission Denied",
-                                         message: "Allow Photos access in Settings to save your painting.")
+                    saveAlert = SaveAlert(title: "Saved to Gallery",
+                                         message: "Your painting is in \"See My Art\". To also save to Photos, allow access in Settings.")
                 }
             }
         }

@@ -1,4 +1,5 @@
 import SwiftUI
+import simd
 
 // ---------------------------------------------------------------------------
 // PaletteColor — a single named color slot in a palette.
@@ -104,17 +105,45 @@ extension Palette {
 @MainActor
 final class PaletteStore: ObservableObject {
 
-    @Published var activePalette:    Palette      = .ocean
-    @Published var activeColorIndex: Int          = 0
+    @Published var activePalette:    Palette        = .ocean
+    @Published var activeColorIndex: Int            = 0
     @Published var recentColors:     [PaletteColor] = []
+    @Published var baseColor:        SIMD3<Float>   = SIMD3(1, 1, 1)  // white default
 
     var activeColor: SIMD3<Float> {
         activePalette.colors[activeColorIndex].rgb
     }
 
-    private static let recentsKey = "pourart.v1.recentColors"
+    static let basePresets: [(name: String, rgb: SIMD3<Float>)] = [
+        ("White",     SIMD3(1.00, 1.00, 1.00)),
+        ("Cream",     SIMD3(0.98, 0.95, 0.88)),
+        ("Lt. Gray",  SIMD3(0.75, 0.75, 0.75)),
+        ("Black",     SIMD3(0.05, 0.05, 0.05)),
+    ]
 
-    init() { loadRecents() }
+    private static let recentsKey  = "pourart.v1.recentColors"
+    private static let baseKey     = "pourart.v1.baseColor"
+
+    init() {
+        loadRecents()
+        if let flat = UserDefaults.standard.array(forKey: Self.baseKey) as? [Float],
+           flat.count == 3 {
+            baseColor = SIMD3(flat[0], flat[1], flat[2])
+        }
+    }
+
+    func setCustomColors(_ colors: [PaletteColor]) {
+        guard !colors.isEmpty else { return }
+        let slots = Array(colors.prefix(5))
+        for (i, c) in slots.enumerated() where i < activePalette.colors.count {
+            activePalette.colors[i] = c
+        }
+    }
+
+    func setBaseColor(_ rgb: SIMD3<Float>) {
+        baseColor = rgb
+        UserDefaults.standard.set([rgb.x, rgb.y, rgb.z], forKey: Self.baseKey)
+    }
 
     // Load a preset (resets the active color index to 0).
     func select(palette: Palette) {
@@ -133,7 +162,7 @@ final class PaletteStore: ObservableObject {
     func addToRecents(_ color: PaletteColor) {
         // Deduplicate by approximate RGB match (within 1/255).
         recentColors.removeAll {
-            simd_distance($0.rgb, color.rgb) < 0.005
+            distance($0.rgb, color.rgb) < 0.005
         }
         recentColors.insert(color, at: 0)
         if recentColors.count > 10 { recentColors = Array(recentColors.prefix(10)) }
