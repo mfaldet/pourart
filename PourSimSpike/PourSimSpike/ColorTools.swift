@@ -9,9 +9,9 @@ enum ColorTools {
     // MARK: - Hex ↔ RGB
 
     static func hex(_ rgb: SIMD3<Float>) -> String {
-        let r = Int((rgb.x * 255).rounded().clamped(to: 0...255))
-        let g = Int((rgb.y * 255).rounded().clamped(to: 0...255))
-        let b = Int((rgb.z * 255).rounded().clamped(to: 0...255))
+        let r = Int(Swift.min(Swift.max((rgb.x * 255).rounded(), 0), 255))
+        let g = Int(Swift.min(Swift.max((rgb.y * 255).rounded(), 0), 255))
+        let b = Int(Swift.min(Swift.max((rgb.z * 255).rounded(), 0), 255))
         return String(format: "#%02X%02X%02X", r, g, b)
     }
 
@@ -237,11 +237,3 @@ enum ColorBlindness: String, CaseIterable, Identifiable {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tiny helpers
-// ---------------------------------------------------------------------------
-private extension CGFloat {
-    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
-        min(max(self, range.lowerBound), range.upperBound)
-    }
-}

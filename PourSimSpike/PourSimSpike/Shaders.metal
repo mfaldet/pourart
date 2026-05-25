@@ -6,21 +6,62 @@ using namespace metal;
 // Layout must match SimUniforms in FluidSimulator.swift exactly.
 // ---------------------------------------------------------------------------
 struct SimUniforms {
-    float2 gravity;       // device-motion gravity, scaled by strength
-    float  dt;            // timestep (seconds)
-    float  viscosity;     // global viscosity coefficient
-    uint2  gridSize;      // (width, height) in cells
-    float2 pourPos;       // normalized [0,1] pour position
-    uint   pourActive;    // 1 if user is pouring
-    float  pourRadius;    // radius in cells
-    uint   debugMode;     // 0=off 1=velocity 2=pressure 3=density
-    float  injectR;       // pour color, sRGB
+    float2 gravity;
+    float  dt;
+    float  viscosity;
+    uint2  gridSize;
+    float2 pourPos;
+    uint   pourActive;
+    float  pourRadius;
+    uint   debugMode;
+    float  injectR;
     float  injectG;
     float  injectB;
-    float  damping;       // per-frame velocity multiplier (e.g. 0.92)
-    float  surfaceTension; // unused in M1 commit, plumbed for follow-up
-    float  buoyancy;      // density → gravity multiplier
+    float  damping;
+    float  surfaceTension;
+    float  buoyancy;
+    float  canvasMinX;
+    float  canvasMinY;
+    float  canvasMaxX;
+    float  canvasMaxY;
+    uint   canvasIsRound;
+    float  baseR;
+    float  baseG;
+    float  baseB;
+    float  dragX;
+    float  dragY;
+    float  toolForce;    // variant strength multiplier
+    uint   advectMode;   // 0=freeze (vel) · 1=extrude (color/density)
 };
+
+// Distance from a cell-space point `p` to the line segment swept between
+// the previous touch sample (pourPos - drag) and the current sample
+// (pourPos). All in cell coordinates. Treating a tool stamp as a capsule
+// along the swept segment is what keeps fast drags continuous instead of
+// dotted at the per-sample stride.
+static float distToTouchSegment(float2 p, constant SimUniforms& u, float2 gridSize) {
+    float2 toCell   = u.pourPos                                  * gridSize;
+    float2 fromCell = (u.pourPos - float2(u.dragX, u.dragY))     * gridSize;
+    float2 seg      = toCell - fromCell;
+    float  segLen2  = dot(seg, seg);
+    float  t        = (segLen2 > 1e-4f)
+                      ? saturate(dot(p - fromCell, seg) / segLen2)
+                      : 0.0f;
+    float2 nearest  = fromCell + seg * t;
+    return length(p - nearest);
+}
+
+// True if a cell-space position falls inside the active canvas mask.
+static bool isOnCanvas(float2 p, constant SimUniforms& u) {
+    if (u.canvasIsRound != 0) {
+        float2 c = float2(u.canvasMinX + u.canvasMaxX,
+                          u.canvasMinY + u.canvasMaxY) * 0.5;
+        float r = (u.canvasMaxX - u.canvasMinX) * 0.5;
+        return distance(p, c) <= r;
+    }
+    return p.x >= u.canvasMinX && p.x <= u.canvasMaxX
+        && p.y >= u.canvasMinY && p.y <= u.canvasMaxY;
+}
 
 // ---------------------------------------------------------------------------
 // Oklab color space helpers
@@ -78,6 +119,12 @@ kernel void addForces(texture2d<float, access::read_write> velocity [[texture(0)
 {
     if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
 
+    // Cells outside the canvas can't hold momentum — they're the "table".
+    if (!isOnCanvas(float2(gid), u)) {
+        velocity.write(float4(0.0), gid);
+        return;
+    }
+
     float4 vel = velocity.read(gid);
     float  den = density.read(gid).r;
 
@@ -85,14 +132,20 @@ kernel void addForces(texture2d<float, access::read_write> velocity [[texture(0)
     vel.xy *= u.damping;
 
     // Gravity scaled by local density (heavier paint flows faster).
-    // The buoyancy term lets the user dial how much density affects flow —
-    // critical for cell formation where the Drop tool injects off-density
-    // paint that needs to actually rise or sink through neighbours.
     vel.xy += u.gravity * den * u.buoyancy * u.dt;
 
     // Velocity clamping — guards against tilt-reversal blow-up.
     float speed = length(vel.xy);
-    if (speed > 50.0) vel.xy = normalize(vel.xy) * 50.0;
+    if (speed > 200.0) vel.xy = normalize(vel.xy) * 200.0;
+
+    // Static-friction settle: when the gravity uniform is zero (i.e. phone
+    // is inside the 15° tilt deadzone) AND the remaining velocity is small,
+    // snap to zero. This stops real acrylic paint from drifting forever via
+    // residual surface-tension forces. Outside the deadzone gravity is
+    // non-zero, so paint can build up flow normally even at slight tilts.
+    if (length(u.gravity) < 0.1 && speed < 0.8) {
+        vel.xy = float2(0);
+    }
 
     velocity.write(vel, gid);
 }
@@ -122,6 +175,7 @@ kernel void surfaceTensionForce(
 {
     if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
     if (u.surfaceTension == 0.0f) return;
+    if (!isOnCanvas(float2(gid), u)) return;
 
     uint2 l  = uint2(max((int)gid.x - 1, 0),               gid.y);
     uint2 r  = uint2(min(gid.x + 1, u.gridSize.x - 1),     gid.y);
@@ -129,10 +183,14 @@ kernel void surfaceTensionForce(
     uint2 up = uint2(gid.x, min(gid.y + 1, u.gridSize.y - 1));
 
     float rho  = density.read(gid).r;
-    float rhoL = density.read(l).r;
-    float rhoR = density.read(r).r;
-    float rhoD = density.read(dn).r;
-    float rhoU = density.read(up).r;
+    // Off-canvas neighbors don't actually exist as paint — using their
+    // (zero) density would create a fake huge gradient at the canvas edge,
+    // sucking paint inward. Mirror the center cell's density instead so
+    // the boundary sees a flat density field.
+    float rhoL = isOnCanvas(float2(l),  u) ? density.read(l).r  : rho;
+    float rhoR = isOnCanvas(float2(r),  u) ? density.read(r).r  : rho;
+    float rhoD = isOnCanvas(float2(dn), u) ? density.read(dn).r : rho;
+    float rhoU = isOnCanvas(float2(up), u) ? density.read(up).r : rho;
 
     float2 grad     = float2(rhoR - rhoL, rhoU - rhoD) * 0.5f;
     float  gradLen  = length(grad);
@@ -164,38 +222,19 @@ kernel void addSources(texture2d<float, access::read_write> color   [[texture(0)
     if (!u.pourActive) return;
     if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
 
-    float2 cellPos  = float2(gid);
-    float2 pourCell = u.pourPos * float2(u.gridSize);
-    float  dist     = length(cellPos - pourCell);
+    float2 cellPos = float2(gid);
+    if (!isOnCanvas(cellPos, u)) return;     // can't pour on the table
+
+    // Distance to the swept segment (capsule), not just the endpoint.
+    // Fast drags now produce continuous strokes instead of separated dots.
+    float dist = distToTouchSegment(cellPos, u, float2(u.gridSize));
     if (dist >= u.pourRadius) return;
 
-    // Quadratic falloff: center is fully opaque immediately, edges taper.
-    // No dt scaling — pour should deposit solid color in a single frame.
-    float t = 1.0 - dist / u.pourRadius;
-    float strength = clamp(t * t, 0.0, 1.0);
-
-    // Convert palette RGB → Oklab for perceptual mixing in the grid.
+    // Hard-edged stamp: inside the radius the cell becomes pure inject color.
+    // Adjacent colors only mix later via advection when the canvas tilts.
     float3 injectLab = rgbToOklab(float3(u.injectR, u.injectG, u.injectB));
-
-    // Read current cell (Oklab in .xyz, opacity in .w).
-    float4 cur = color.read(gid);
-    float  curOpacity = cur.w;
-
-    // Mix as a proper opacity-weighted running average. This avoids the
-    // "ghost black" bug where an empty cell's (0,0,0) Oklab would be lerped
-    // toward the injection color through dark intermediate shades.
-    //   blendWeight = 1 when curOpacity = 0 (full replacement)
-    //   blendWeight ≈ strength/curOpacity when cell is already painted
-    float  blendWeight = strength / max(curOpacity + strength, 1e-4);
-    float3 newLab = mix(cur.xyz, injectLab, blendWeight);
-    float  newOpacity = clamp(curOpacity + strength, 0.0, 1.0);
-
-    color.write(float4(newLab, newOpacity), gid);
-
-    // Density injection — slight overshoot so fresh paint is buoyant.
-    // This is what makes pours pile up briefly before flowing.
-    float curDen = density.read(gid).r;
-    density.write(float4(clamp(curDen + strength * 1.2, 0.0, 1.2)), gid);
+    color.write(float4(injectLab, 1.0), gid);
+    density.write(float4(1.2, 0.0, 0.0, 0.0), gid);
 }
 
 // ---------------------------------------------------------------------------
@@ -261,9 +300,9 @@ kernel void wipeTool(texture2d<float, access::read_write> color    [[texture(0)]
     if (!u.pourActive) return;
     if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
 
-    float2 cellPos   = float2(gid);
-    float2 wipeCell  = u.pourPos * float2(u.gridSize);
-    float  dist      = length(cellPos - wipeCell);
+    float2 cellPos = float2(gid);
+    // Swept-segment distance so quick wipe strokes are continuous.
+    float  dist    = distToTouchSegment(cellPos, u, float2(u.gridSize));
     if (dist >= u.pourRadius) return;
 
     float t       = 1.0f - dist / u.pourRadius;
@@ -278,6 +317,110 @@ kernel void wipeTool(texture2d<float, access::read_write> color    [[texture(0)]
 
     float4 vel = velocity.read(gid);
     vel.xy *= max(1.0f - wipeStr * 0.6f, 0.0f);
+    velocity.write(vel, gid);
+}
+
+// ---------------------------------------------------------------------------
+// Swipe — drags paint in the direction the finger is moving. Acts like a
+// palette knife: doesn't inject new color, just shoves the velocity field
+// along the user's drag vector. Stretches existing paint into streaks.
+// ---------------------------------------------------------------------------
+kernel void swipeTool(texture2d<float, access::read_write> color    [[texture(0)]],
+                      texture2d<float, access::read_write> density  [[texture(1)]],
+                      texture2d<float, access::read_write> velocity [[texture(2)]],
+                      constant SimUniforms& u                       [[buffer(0)]],
+                      uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (!u.pourActive) return;
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+    if (!isOnCanvas(float2(gid), u)) return;
+
+    float2 cell    = float2(gid);
+    // Swept-segment distance so a swipe pushes the whole path, not dots.
+    float  dist    = distToTouchSegment(cell, u, float2(u.gridSize));
+    if (dist >= u.pourRadius) return;
+
+    // Drag vector → cells per second (UV * gridSize).
+    float2 drag = float2(u.dragX, u.dragY) * float2(u.gridSize);
+    float  dragMag = length(drag);
+    if (dragMag < 0.001f) return;
+
+    // Drag carries both direction and speed — multiply by falloff, the
+    // variant's toolForce, and a gain so a single brisk swipe noticeably
+    // stretches the paint.
+    float falloff = 1.0f - dist / u.pourRadius;
+    float4 vel = velocity.read(gid);
+    vel.xy += drag * falloff * 220.0f * u.toolForce;
+    velocity.write(vel, gid);
+}
+
+// ---------------------------------------------------------------------------
+// Stir — rotational impulse around the finger. Adds tangential velocity so
+// existing paint swirls into spirals. Direction follows the drag sign.
+// ---------------------------------------------------------------------------
+kernel void stirTool(texture2d<float, access::read_write> color    [[texture(0)]],
+                     texture2d<float, access::read_write> density  [[texture(1)]],
+                     texture2d<float, access::read_write> velocity [[texture(2)]],
+                     constant SimUniforms& u                       [[buffer(0)]],
+                     uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (!u.pourActive) return;
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+    if (!isOnCanvas(float2(gid), u)) return;
+
+    float2 cell = float2(gid);
+    float2 here = u.pourPos * float2(u.gridSize);
+    float2 r    = cell - here;
+    float  dist = length(r);
+    if (dist < 0.5f || dist >= u.pourRadius) return;
+
+    // Sign of the angular twist comes from the drag direction (cross product
+    // of "outward from center" × "drag direction"). Means stroking around the
+    // touch in either direction reinforces the swirl.
+    float2 drag = float2(u.dragX, u.dragY) * float2(u.gridSize);
+    float dragMag = length(drag);
+    if (dragMag < 0.001f) return;
+
+    // Tangent vector — rotate (r) by 90°
+    float2 tangent = float2(-r.y, r.x) / max(dist, 1e-4);
+    float  twist   = sign(tangent.x * drag.x + tangent.y * drag.y);
+    if (twist == 0) twist = 1;
+
+    float falloff = 1.0f - dist / u.pourRadius;
+    float push    = falloff * dragMag * 80.0f * u.toolForce;
+
+    float4 vel = velocity.read(gid);
+    vel.xy += tangent * push * twist;
+    velocity.write(vel, gid);
+}
+
+// ---------------------------------------------------------------------------
+// Blow — radially outward velocity (hair dryer / air compressor / straw).
+// No paint injection. Force is proportional to falloff × toolForce so the
+// "Compressor" variant punches harder than "Dryer" in a smaller area.
+// ---------------------------------------------------------------------------
+kernel void blowTool(texture2d<float, access::read_write> color    [[texture(0)]],
+                     texture2d<float, access::read_write> density  [[texture(1)]],
+                     texture2d<float, access::read_write> velocity [[texture(2)]],
+                     constant SimUniforms& u                       [[buffer(0)]],
+                     uint2 gid                                     [[thread_position_in_grid]])
+{
+    if (!u.pourActive) return;
+    if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
+    if (!isOnCanvas(float2(gid), u)) return;
+
+    float2 cell = float2(gid);
+    float2 here = u.pourPos * float2(u.gridSize);
+    float2 r    = cell - here;
+    float  dist = length(r);
+    if (dist < 0.5f || dist >= u.pourRadius) return;
+
+    float2 outward = r / dist;
+    float  falloff = 1.0f - dist / u.pourRadius;
+    float  push    = falloff * 280.0f * u.toolForce;
+
+    float4 vel = velocity.read(gid);
+    vel.xy += outward * push;
     velocity.write(vel, gid);
 }
 
@@ -354,7 +497,9 @@ kernel void fillCanvas(texture2d<float, access::write> color   [[texture(0)]],
     if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
     float3 lab = rgbToOklab(float3(u.injectR, u.injectG, u.injectB));
     color.write(float4(lab, 1.0), gid);
-    density.write(float4(1.0, 0.0, 0.0, 0.0), gid);
+    // On-canvas cells start with full density; the table has zero mass.
+    float d = isOnCanvas(float2(gid), u) ? 1.0 : 0.0;
+    density.write(float4(d, 0.0, 0.0, 0.0), gid);
 }
 
 kernel void advect(texture2d<float, access::read>        velocity [[texture(0)]],
@@ -365,15 +510,76 @@ kernel void advect(texture2d<float, access::read>        velocity [[texture(0)]]
 {
     if (gid.x >= u.gridSize.x || gid.y >= u.gridSize.y) return;
 
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
     float2 gridSizeF = float2(u.gridSize);
-    float2 uv = (float2(gid) + 0.5) / gridSizeF;
+
+    // Off-canvas handling depends on advectMode:
+    //   1 (extrude — color & density): mirror the nearest on-canvas cell so
+    //       linear sampling at the boundary doesn't bleed base color in.
+    //   0 (freeze — velocity):        keep zero so the pressure-solve sees a
+    //       clean boundary and we don't push paint outside the canvas.
+    if (!isOnCanvas(float2(gid), u)) {
+        if (u.advectMode == 1) {
+            float2 projected = float2(gid);
+            if (u.canvasIsRound != 0) {
+                float2 c = float2(u.canvasMinX + u.canvasMaxX,
+                                  u.canvasMinY + u.canvasMaxY) * 0.5;
+                float r = (u.canvasMaxX - u.canvasMinX) * 0.5 - 0.6;
+                float2 dir = projected - c;
+                float  len = max(length(dir), 1e-4);
+                projected = c + dir * (min(len, r) / len);
+            } else {
+                projected.x = clamp(projected.x,
+                                    u.canvasMinX + 0.5, u.canvasMaxX - 0.5);
+                projected.y = clamp(projected.y,
+                                    u.canvasMinY + 0.5, u.canvasMaxY - 0.5);
+            }
+            float2 projUV = projected / gridSizeF;
+            fieldOut.write(fieldIn.sample(s, projUV), gid);
+        } else {
+            fieldOut.write(fieldIn.read(gid), gid);
+        }
+        return;
+    }
+
+    float2 uv  = (float2(gid) + 0.5) / gridSizeF;
     float2 vel = velocity.read(gid).xy;
 
-    // Backtrace position in UV space.
-    float2 prevUV = uv - vel * u.dt / gridSizeF;
-    prevUV = clamp(prevUV, 0.5 / gridSizeF, 1.0 - 0.5 / gridSizeF);
+    // Static-friction skip: below this velocity the cell is considered "at
+    // rest" and we copy it through unchanged. This prevents the linear
+    // sampler from imperceptibly blurring colors every frame — over a
+    // minute that blur is what was draining the painting to grey.
+    if (length(vel) < 0.3) {
+        fieldOut.write(fieldIn.read(gid), gid);
+        return;
+    }
 
-    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    // Backtrace position in UV space.
+    float2 prevUV  = uv - vel * u.dt / gridSizeF;
+    float2 prevPix = prevUV * gridSizeF;
+
+    // If the back-trace lands off the canvas (e.g. a border cell whose
+    // velocity points outward), clamp it to the nearest interior cell
+    // instead of freezing. This stops the visible "base-color band" at
+    // the edges and lets paint actually flow up to the boundary.
+    if (!isOnCanvas(prevPix, u)) {
+        if (u.canvasIsRound != 0) {
+            float2 c = float2(u.canvasMinX + u.canvasMaxX,
+                              u.canvasMinY + u.canvasMaxY) * 0.5;
+            float r = (u.canvasMaxX - u.canvasMinX) * 0.5 - 0.6;
+            float2 dir = prevPix - c;
+            float  len = max(length(dir), 1e-4);
+            prevPix = c + dir * (min(len, r) / len);
+        } else {
+            prevPix.x = clamp(prevPix.x,
+                              u.canvasMinX + 0.5, u.canvasMaxX - 0.5);
+            prevPix.y = clamp(prevPix.y,
+                              u.canvasMinY + 0.5, u.canvasMaxY - 0.5);
+        }
+        prevUV = prevPix / gridSizeF;
+    }
+
+    prevUV = clamp(prevUV, 0.5 / gridSizeF, 1.0 - 0.5 / gridSizeF);
     float4 val = fieldIn.sample(s, prevUV);
     fieldOut.write(val, gid);
 }
@@ -500,6 +706,54 @@ fragment float4 renderFrag(VertexOut in               [[stage_in]],
                             constant SimUniforms& u     [[buffer(0)]])
 {
     constexpr sampler s(filter::linear, address::clamp_to_edge);
+
+    // Table surface around the canvas — color picked to contrast with the
+    // user's chosen base color so the canvas always pops:
+    //   light base (luma > 0.5) → dark granite table
+    //   dark  base (luma ≤ 0.5) → light off-white plastic-folding-table
+    float2 pixelPos = in.uv * float2(u.gridSize);
+    if (!isOnCanvas(pixelPos, u)) {
+        // Distance from canvas edge, used for the soft contact shadow.
+        float edgeDist;
+        if (u.canvasIsRound != 0) {
+            float2 c = float2(u.canvasMinX + u.canvasMaxX,
+                              u.canvasMinY + u.canvasMaxY) * 0.5;
+            float r = (u.canvasMaxX - u.canvasMinX) * 0.5;
+            edgeDist = distance(pixelPos, c) - r;
+        } else {
+            float dx = max(u.canvasMinX - pixelPos.x, pixelPos.x - u.canvasMaxX);
+            float dy = max(u.canvasMinY - pixelPos.y, pixelPos.y - u.canvasMaxY);
+            edgeDist = max(dx, dy);
+        }
+
+        // WCAG-ish base-color luminance (linear approximation good enough here)
+        float baseLum = dot(float3(u.baseR, u.baseG, u.baseB),
+                            float3(0.2126, 0.7152, 0.0722));
+
+        float3 table;
+        if (baseLum > 0.5) {
+            // Dark granite. Hash-noise speckles give it crystalline grit.
+            float3 graniteBase = float3(0.14, 0.13, 0.135);
+            float h = fract(sin(dot(pixelPos, float2(12.9898, 78.233))) * 43758.5453);
+            // Tiny clusters of darker / lighter flecks
+            float fleck = (h - 0.5) * 0.18;
+            float h2 = fract(sin(dot(pixelPos * 0.5, float2(39.3468, 11.135))) * 25731.231);
+            if (h2 > 0.985) fleck += 0.15;          // rare bright crystal
+            else if (h2 < 0.02) fleck -= 0.08;      // rare dark vein
+            table = clamp(graniteBase + fleck, 0.04, 0.35);
+        } else {
+            // Light off-white plastic folding table — slightly warm.
+            float3 plasticBase = float3(0.94, 0.93, 0.89);
+            // Very faint horizontal banding so it doesn't look flat-CGI
+            float band = sin(pixelPos.y * 0.07) * 0.012;
+            table = clamp(plasticBase + band, 0.0, 1.0);
+        }
+
+        // Soft contact shadow under the canvas edge (~8-cell band)
+        float shade = saturate(1.0 - edgeDist / 8.0);
+        table *= 1.0 - shade * 0.35;
+        return float4(table, 1.0);
+    }
 
     if (u.debugMode == 1) {
         float2 vel = velocityTex.sample(s, in.uv).xy;

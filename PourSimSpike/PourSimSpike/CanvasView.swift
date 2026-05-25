@@ -8,12 +8,16 @@ final class TouchMTKView: MTKView {
 
     var onTouchesChanged: (([PourTouch]) -> Void)?
 
-    // Radius grows from minPourRadius → maxPourRadius over pourGrowSeconds.
-    private let minPourRadius: Float  = 8
-    private let maxPourRadius: Float  = 40
-    private let pourGrowSeconds: Double = 3.0
+    // Pressure → pour radius mapping.
+    // Light touch = pinprick · normal touch = small stream · hard press = wide pour.
+    // 10× smaller than previous (was 1.0…40) — full-finger press is now a
+    // ~4-cell radius bottle-stream, light tap is a single cell.
+    private let minPourRadius: Float = 0.1
+    private let maxPourRadius: Float = 4.0
 
-    private var touchStartTimes: [ObjectIdentifier: CFTimeInterval] = [:]
+    // Previous UV position per touch — used to compute drag vectors for
+    // swipe/stir tools.
+    private var lastUV: [ObjectIdentifier: SIMD2<Float>] = [:]
 
     override init(frame: CGRect, device: (any MTLDevice)?) {
         super.init(frame: frame, device: device)
@@ -23,42 +27,77 @@ final class TouchMTKView: MTKView {
     required init(coder: NSCoder) { fatalError() }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        let now = CACurrentMediaTime()
-        for t in touches { touchStartTimes[ObjectIdentifier(t)] = now }
         report(event)
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         report(event)
     }
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for t in touches { touchStartTimes.removeValue(forKey: ObjectIdentifier(t)) }
+        for t in touches { lastUV.removeValue(forKey: ObjectIdentifier(t)) }
         report(event)
     }
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchStartTimes.removeAll()
+        lastUV.removeAll()
         onTouchesChanged?([])
     }
 
     private func report(_ event: UIEvent?) {
         guard let all = event?.allTouches else { onTouchesChanged?([]); return }
-        let now = CACurrentMediaTime()
         let active = all.filter { $0.phase != .ended && $0.phase != .cancelled }
-        let result = active.map { touch -> PourTouch in
-            let pt      = touch.location(in: self)
-            let pos     = SIMD2<Float>(Float(pt.x / bounds.width),
-                                      1.0 - Float(pt.y / bounds.height))
-            let start   = touchStartTimes[ObjectIdentifier(touch)] ?? now
-            let elapsed = Float(min((now - start) / pourGrowSeconds, 1.0))
-            let radius  = minPourRadius + (maxPourRadius - minPourRadius) * elapsed
-            return PourTouch(pos: pos, radius: radius)
+
+        // Capture every sub-frame sample iOS recorded (ProMotion samples at
+        // up to 240Hz internally) so fast drags stay continuous, not dotted.
+        var result: [PourTouch] = []
+        result.reserveCapacity(active.count * 4)
+        for touch in active {
+            let id      = ObjectIdentifier(touch)
+            let samples = event?.coalescedTouches(for: touch) ?? [touch]
+            var prevUV  = lastUV[id]
+            for s in samples {
+                let pt  = s.location(in: self)
+                let pos = SIMD2<Float>(Float(pt.x / bounds.width),
+                                       Float(pt.y / bounds.height))
+                let drag: SIMD2<Float>
+                if let prev = prevUV { drag = pos - prev }
+                else                 { drag = .zero }
+                result.append(PourTouch(pos: pos, radius: radius(for: s), drag: drag))
+                prevUV = pos
+            }
+            lastUV[id] = prevUV
         }
         onTouchesChanged?(result)
+    }
+
+    // Touch pressure → pour radius. Prefers `force` (Apple Pencil & older
+    // 3D-Touch iPhones), falls back to contact-area (`majorRadius`) which
+    // every iPhone reports — light tap ≈ 5pt, hard press ≈ 20pt+.
+    private func radius(for touch: UITouch) -> Float {
+        var pressure: Float = 0
+
+        if touch.maximumPossibleForce > 0 {
+            let normalized = Float(touch.force / touch.maximumPossibleForce)
+            if normalized > 0.001 { pressure = normalized }
+        }
+
+        if pressure == 0 {
+            let area = Float(touch.majorRadius)
+            // Empirical: 1pt = barely touching, 4pt = light, 10pt = normal, 20pt = hard.
+            pressure = Swift.max(0, Swift.min(1, (area - 1) / 19))
+        }
+
+        // Curve that *damps* the low end so a gentle touch stays gentle.
+        // pow(p, 1.7) keeps light taps ~3 cells, normal touches ~13 cells,
+        // hard presses at the full ~40-cell maximum.
+        let curved = pow(pressure, 1.7)
+        return minPourRadius + (maxPourRadius - minPourRadius) * curved
     }
 }
 
 struct PourTouch {
     let pos:    SIMD2<Float>
     let radius: Float
+    /// Per-frame drag vector in UV space — used by Swipe/Stir to push paint.
+    let drag:   SIMD2<Float>
 }
 
 struct CanvasView: UIViewRepresentable {
@@ -85,7 +124,7 @@ struct CanvasView: UIViewRepresentable {
 
         view.onTouchesChanged = { [weak coord = context.coordinator] touches in
             coord?.renderer?.pourTouches = touches
-            coord?.renderer?.gravity = coord?.motion.gravity ?? .zero
+            // gravity is now polled live from motionService in draw()
         }
 
         return view
@@ -121,7 +160,8 @@ struct CanvasView: UIViewRepresentable {
             do {
                 let sim = try FluidSimulator(device: device, width: gridW, height: gridH)
                 let r   = try Renderer(sim: sim, view: view)
-                r.onFPS = onFPS
+                r.onFPS         = onFPS
+                r.motionService = motion          // tilt updates every frame
                 renderer = r
                 view.delegate = r
                 motion.start()

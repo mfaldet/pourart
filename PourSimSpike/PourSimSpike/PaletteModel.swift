@@ -144,9 +144,10 @@ final class PaletteStore: ObservableObject {
     @Published var recentColors:     [PaletteColor] = []
     @Published var baseColor:        SIMD3<Float>   = SIMD3(1, 1, 1)  // white default
     @Published var savedPalettes:    [Palette]      = []
+    @Published var transientColor:   SIMD3<Float>?  = nil  // set when neutral row tapped
 
     var activeColor: SIMD3<Float> {
-        activePalette.colors[activeColorIndex].rgb
+        transientColor ?? activePalette.colors[activeColorIndex].rgb
     }
 
     static let basePresets: [(name: String, rgb: SIMD3<Float>)] = [
@@ -155,6 +156,24 @@ final class PaletteStore: ObservableObject {
         ("Lt. Gray",  SIMD3(0.75, 0.75, 0.75)),
         ("Black",     SIMD3(0.05, 0.05, 0.05)),
     ]
+
+    /// Neutral palette — always available on the canvas alongside the custom
+    /// palette so artists can mix in highlights, shadows, and metallics
+    /// without rebuilding their main palette.
+    static let neutralPalette: [SIMD3<Float>] = [
+        SIMD3(0.99, 0.99, 0.99),  // Pure white — highlights & cells
+        SIMD3(0.04, 0.04, 0.04),  // Black — shadows & contrast
+        SIMD3(0.78, 0.78, 0.78),  // Light gray
+        SIMD3(0.36, 0.36, 0.36),  // Dark gray
+        SIMD3(0.83, 0.69, 0.22),  // Gold — metallic accent
+        SIMD3(0.75, 0.75, 0.78),  // Silver — metallic accent
+    ]
+
+    /// Switch the active color to a transient (off-palette) RGB value —
+    /// used by the on-canvas neutral row. Does NOT modify the saved palette.
+    func selectNeutral(_ rgb: SIMD3<Float>) {
+        transientColor = rgb
+    }
 
     private static let recentsKey = "pourart.v1.recentColors"
     private static let baseKey    = "pourart.v1.baseColor"

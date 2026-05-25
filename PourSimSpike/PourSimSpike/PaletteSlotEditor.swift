@@ -112,7 +112,7 @@ struct PaletteSlotEditor: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                GradientSlider(value: $hue, in: 0...1,
+                GradientSlider(value: $hue, range: 0...1,
                                gradient: hueGradient,
                                trackHeight: 14)
             }
@@ -128,7 +128,7 @@ struct PaletteSlotEditor: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                GradientSlider(value: $saturation, in: 0...1,
+                GradientSlider(value: $saturation, range: 0...1,
                                gradient: Gradient(colors: [
                                    Color(hue: hue, saturation: 0,  brightness: brightness),
                                    Color(hue: hue, saturation: 1,  brightness: brightness)]),
@@ -146,7 +146,7 @@ struct PaletteSlotEditor: View {
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                GradientSlider(value: $brightness, in: 0...1,
+                GradientSlider(value: $brightness, range: 0...1,
                                gradient: Gradient(colors: [
                                    .black,
                                    Color(hue: hue, saturation: saturation, brightness: 1)]),

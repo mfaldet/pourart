@@ -15,11 +15,11 @@ struct PaintSetupView: View {
 
                 header
 
-                consistencySection
-
                 canvasShapeSection
 
                 baseColorSection
+
+                consistencySection
             }
             .padding(.top, 24)
             .padding(.bottom, 40)

@@ -6,12 +6,18 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     private let sim: FluidSimulator
     private let renderPipeline: MTLRenderPipelineState
-    private var uniformsCopy: SimUniforms = SimUniforms()
 
     var gravity: SIMD2<Float> = .zero
     var pourTouches: [PourTouch] = []
     var injectColor: SIMD3<Float> = SIMD3(0.8, 0.2, 0.1)
     var activeTool: Tool = .pour
+    var toolRadius: Float = 14
+    var toolForce: Float = 1.0
+
+    /// Set by the Coordinator. Polled every frame in draw() so tilt is
+    /// continuously responsive — paint reacts to the device orientation
+    /// whether the user is touching the screen or not.
+    weak var motionService: MotionService?
 
     private var frameCount = 0
     private var lastFPSTime = CACurrentMediaTime()
@@ -30,6 +36,7 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func fillBase(rgb: SIMD3<Float>)        { sim.fillBase(rgb: rgb) }
     func applyConsistency(_ value: Float)  { sim.applyConsistency(value) }
+    func applyCanvasShape(_ s: CanvasShape) { sim.applyCanvasShape(s) }
 
     private(set) var drawableSize: CGSize = .zero
 
@@ -61,10 +68,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: passDesc) else { return nil }
 
-        var u            = SimUniforms()
-        u.gridWidth      = UInt32(sim.gridWidth)
-        u.gridHeight     = UInt32(sim.gridHeight)
-        u.debugMode      = 0   // always normal render — ignore current debug mode
+        var u       = sim.renderUniforms()   // includes canvas bounds + base color
+        u.debugMode = 0                       // always normal render
 
         enc.setRenderPipelineState(renderPipeline)
         enc.setFragmentTexture(sim.colorTex,    index: 0)
@@ -109,19 +114,25 @@ final class Renderer: NSObject, MTKViewDelegate {
         else { return }
 
         // Sim step
-        sim.step(gravity: gravity,
+        // Pull the latest gravity from the motion service every frame so
+        // tilt changes are immediate — no touch input required.
+        let liveGravity = motionService?.gravity ?? gravity
+
+        sim.step(gravity: liveGravity,
                  pourTouches: pourTouches,
                  activeTool: activeTool,
+                 toolRadius: toolRadius,
+                 toolForce: toolForce,
                  injectColor: injectColor,
                  debugMode: 0,
                  commandBuffer: cmdBuf)
 
-        // Render pass
-        uniformsCopy.gravity    = gravity
-        uniformsCopy.pourActive = pourTouches.isEmpty ? 0 : 1
-        uniformsCopy.debugMode  = 0
-        uniformsCopy.gridWidth  = UInt32(sim.gridWidth)
-        uniformsCopy.gridHeight = UInt32(sim.gridHeight)
+        // Render pass — pull canvas bounds + base color from the sim so the
+        // fragment shader sees the user's actual choices.
+        var u           = sim.renderUniforms()
+        u.gravity       = gravity
+        u.pourActive    = pourTouches.isEmpty ? 0 : 1
+        u.debugMode     = 0
 
         guard let enc = cmdBuf.makeRenderCommandEncoder(descriptor: passDesc) else { return }
         enc.setRenderPipelineState(renderPipeline)
@@ -129,7 +140,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         enc.setFragmentTexture(sim.velocityTex, index: 1)
         enc.setFragmentTexture(sim.pressureTex, index: 2)
         enc.setFragmentTexture(sim.densityTex,  index: 3)
-        enc.setFragmentBytes(&uniformsCopy, length: MemoryLayout<SimUniforms>.stride, index: 0)
+        enc.setFragmentBytes(&u, length: MemoryLayout<SimUniforms>.stride, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         enc.endEncoding()
 

@@ -6,7 +6,7 @@ import CoreMotion
 struct SimUniforms {
     var gravity: SIMD2<Float>   = .zero
     var dt: Float               = 1.0 / 60.0
-    var viscosity: Float        = 0.0008    // up from 0.0001 — paint is honey, not water
+    var viscosity: Float        = 0.0008
     var gridWidth: UInt32       = 256
     var gridHeight: UInt32      = 576
     var pourPosX: Float         = 0
@@ -17,9 +17,34 @@ struct SimUniforms {
     var injectR: Float          = 0.8
     var injectG: Float          = 0.2
     var injectB: Float          = 0.1
-    var damping: Float          = 0.94      // per-frame velocity multiplier
-    var surfaceTension: Float   = 0.06      // CSF cohesion — creates lacing at color boundaries
-    var buoyancy: Float         = 4.0       // density → gravity strength
+    var damping: Float          = 0.97
+    var surfaceTension: Float   = 0.18      // bumped — keeps color blobs cohesive (taffy-like)
+    var buoyancy: Float         = 6.0       // density → gravity strength
+
+    // Canvas bounds (in cell coords). Defaults = whole grid (no border).
+    var canvasMinX: Float       = 0
+    var canvasMinY: Float       = 0
+    var canvasMaxX: Float       = 256
+    var canvasMaxY: Float       = 576
+    var canvasIsRound: UInt32   = 0
+
+    // Base color for cells that get reset (paint flowing off canvas).
+    var baseR: Float            = 1.0
+    var baseG: Float            = 1.0
+    var baseB: Float            = 1.0
+
+    // Per-touch drag vector (UV space) for tools that push paint (swipe/stir).
+    var dragX: Float            = 0
+    var dragY: Float            = 0
+
+    // Strength multiplier from the active ToolVariant (e.g. a wire-thin
+    // string pushes harder than a soft yarn at the same radius).
+    var toolForce: Float        = 1.0
+
+    // Advect boundary mode: 0 = freeze off-canvas (used for velocity so
+    // pressure-solve stays stable), 1 = extrude nearest on-canvas (used for
+    // color/density so linear sampling doesn't bleed base color in).
+    var advectMode: UInt32      = 0
 }
 
 @MainActor
@@ -56,10 +81,9 @@ final class FluidSimulator {
     private let psAddForces:        MTLComputePipelineState
     private let psSurfaceTension:   MTLComputePipelineState
     private let psAddSources:       MTLComputePipelineState
-    private let psDropTool:         MTLComputePipelineState
-    private let psWipeTool:         MTLComputePipelineState
-    private let psThinnerTool:      MTLComputePipelineState
-    private let psThickenerTool:    MTLComputePipelineState
+    private let psSwipeTool:        MTLComputePipelineState
+    private let psStirTool:         MTLComputePipelineState
+    private let psBlowTool:         MTLComputePipelineState
     private let psAdvect:           MTLComputePipelineState
     private let psDiffuse:          MTLComputePipelineState
     private let psDivergence:       MTLComputePipelineState
@@ -67,6 +91,11 @@ final class FluidSimulator {
     private let psSubtractGradient: MTLComputePipelineState
 
     private var uniforms = SimUniforms()
+
+    // Snapshot of the sim's current uniforms, for the renderer's fragment
+    // pass. Canvas bounds and base color live in here and would otherwise be
+    // lost if the renderer built its own SimUniforms() from scratch.
+    func renderUniforms() -> SimUniforms { uniforms }
 
     // MARK: - Init
 
@@ -92,10 +121,9 @@ final class FluidSimulator {
         psAddForces        = try pipeline("addForces")
         psSurfaceTension   = try pipeline("surfaceTensionForce")
         psAddSources       = try pipeline("addSources")
-        psDropTool         = try pipeline("dropTool")
-        psWipeTool         = try pipeline("wipeTool")
-        psThinnerTool      = try pipeline("thinnerTool")
-        psThickenerTool    = try pipeline("thickenerTool")
+        psSwipeTool        = try pipeline("swipeTool")
+        psStirTool         = try pipeline("stirTool")
+        psBlowTool         = try pipeline("blowTool")
         psAdvect           = try pipeline("advect")
         psDiffuse          = try pipeline("diffuse")
         psDivergence       = try pipeline("divergence")
@@ -125,14 +153,64 @@ final class FluidSimulator {
     }
 
     // Adjust viscosity and damping from a consistency value (-1=thin … +1=thick).
+    // -1 (thin)   → damping 0.99, viscosity 0.0001, surface tension 0.06 — flows like water
+    //  0 (medium) → damping 0.95, viscosity 0.002,  surface tension 0.18 — taffy
+    // +1 (thick)  → damping 0.82, viscosity 0.020,  surface tension 0.40 — barely moves
     func applyConsistency(_ value: Float) {
-        let clamped = max(-1, min(1, value))
-        uniforms.damping    = 0.94 - clamped * 0.04   // thin: 0.98 · thick: 0.90
-        uniforms.viscosity  = 0.0008 * Float(pow(3.0, Double(clamped))) // thin: ~0.00027 · thick: ~0.0024
+        let v          = Swift.max(-1, Swift.min(1, value))
+        let thinFactor = Float((1 - Double(v)) * 0.5)            // 0 thick, 1 thin
+        let thickFactor = 1 - thinFactor
+        uniforms.damping        = 0.82 + thinFactor * 0.17       // 0.82…0.99
+        uniforms.viscosity      = 0.0001 * Float(exp(Double(thickFactor) * 5.3))
+        uniforms.surfaceTension = 0.06 + thickFactor * 0.34      // 0.06…0.40
+    }
+
+    // Reshape the canvas. The full grid is always 256×576; canvas is a
+    // centered sub-region (rect or circle) inside it. Cells outside become
+    // "table" — paint can't be poured there and any paint that flows there
+    // gets cleared back to the base color.
+    func applyCanvasShape(_ shape: CanvasShape) {
+        let w = Float(gridWidth)
+        let h = Float(gridHeight)
+        let cx = w * 0.5, cy = h * 0.5
+
+        switch shape {
+        case .portrait:
+            // tall rectangle, 84% wide × 80% tall
+            let halfW = w * 0.42, halfH = h * 0.40
+            uniforms.canvasMinX = cx - halfW; uniforms.canvasMaxX = cx + halfW
+            uniforms.canvasMinY = cy - halfH; uniforms.canvasMaxY = cy + halfH
+            uniforms.canvasIsRound = 0
+        case .landscape:
+            // wide rectangle: same width, but shorter
+            let halfW = w * 0.46, halfH = h * 0.20
+            uniforms.canvasMinX = cx - halfW; uniforms.canvasMaxX = cx + halfW
+            uniforms.canvasMinY = cy - halfH; uniforms.canvasMaxY = cy + halfH
+            uniforms.canvasIsRound = 0
+        case .square:
+            let side = Swift.min(w, h) * 0.46
+            uniforms.canvasMinX = cx - side; uniforms.canvasMaxX = cx + side
+            uniforms.canvasMinY = cy - side; uniforms.canvasMaxY = cy + side
+            uniforms.canvasIsRound = 0
+        case .round:
+            let r = Swift.min(w, h) * 0.46
+            uniforms.canvasMinX = cx - r; uniforms.canvasMaxX = cx + r
+            uniforms.canvasMinY = cy - r; uniforms.canvasMaxY = cy + r
+            uniforms.canvasIsRound = 1
+        }
+    }
+
+    // Remember the base color so cells that flow off-canvas can be cleared
+    // back to the user's chosen base.
+    func setBaseColor(rgb: SIMD3<Float>) {
+        uniforms.baseR = rgb.x
+        uniforms.baseG = rgb.y
+        uniforms.baseB = rgb.z
     }
 
     // Fill every grid cell with a solid base color.  Call once before the first frame.
     func fillBase(rgb: SIMD3<Float>) {
+        setBaseColor(rgb: rgb)
         var u = uniforms
         u.injectR = rgb.x; u.injectG = rgb.y; u.injectB = rgb.z
 
@@ -168,6 +246,8 @@ final class FluidSimulator {
     func step(gravity: SIMD2<Float>,
               pourTouches: [PourTouch],
               activeTool: Tool,
+              toolRadius: Float,
+              toolForce: Float,
               injectColor: SIMD3<Float>,
               debugMode: UInt32,
               commandBuffer: MTLCommandBuffer)
@@ -210,19 +290,23 @@ final class FluidSimulator {
 
         // 3. Apply active tool — one dispatch per active finger.
         // Pour uses a per-touch growing radius; other tools use their fixed radius.
+        // Map tool → pipeline. New tools (string/balloon/air/cup) re-use
+        // existing kernels with different radius/force from their variant.
         let toolPipeline: MTLComputePipelineState = {
             switch activeTool {
-            case .pour:      return psAddSources
-            case .drop:      return psDropTool
-            case .wipe:      return psWipeTool
-            case .thinner:   return psThinnerTool
-            case .thickener: return psThickenerTool
+            case .pour, .balloon, .cup: return psAddSources
+            case .swipe, .string:       return psSwipeTool
+            case .stir:                 return psStirTool
+            case .air:                  return psBlowTool
             }
         }()
 
+        uniforms.toolForce = toolForce
+
         if pourTouches.isEmpty {
             uniforms.pourActive = 0
-            uniforms.pourRadius = activeTool.radius
+            uniforms.pourRadius = toolRadius
+            uniforms.dragX = 0; uniforms.dragY = 0
             encode(toolPipeline) { enc in
                 enc.setTexture(curCol, index: 0)
                 enc.setTexture(curDen, index: 1)
@@ -233,7 +317,11 @@ final class FluidSimulator {
                 uniforms.pourPosX   = touch.pos.x
                 uniforms.pourPosY   = touch.pos.y
                 uniforms.pourActive = 1
-                uniforms.pourRadius = activeTool == .pour ? touch.radius : activeTool.radius
+                // Pour uses the per-touch pressure radius from TouchMTKView;
+                // every other tool uses the variant's radius.
+                uniforms.pourRadius = activeTool == .pour ? touch.radius : toolRadius
+                uniforms.dragX      = touch.drag.x
+                uniforms.dragY      = touch.drag.y
                 encode(toolPipeline) { enc in
                     enc.setTexture(curCol, index: 0)
                     enc.setTexture(curDen, index: 1)
@@ -242,8 +330,9 @@ final class FluidSimulator {
             }
         }
 
-        // 3. Advect velocity
+        // 3. Advect velocity — freeze off-canvas at zero (advectMode 0)
         let nextVel = velPing ? velocityB : velocityA
+        uniforms.advectMode = 0
         encode(psAdvect) { enc in
             enc.setTexture(curVel,  index: 0)
             enc.setTexture(curVel,  index: 1)
@@ -288,9 +377,12 @@ final class FluidSimulator {
             enc.setTexture(fPre, index: 1)
         }
 
-        // 6. Advect color
+        // 6. Advect color — extrude nearest on-canvas value off-canvas
+        //    (advectMode 1) so the linear sampler doesn't bleed base color
+        //    in at the boundary.
         let nextCol = colorPing ? colorB : colorA
         let advVel  = velPing ? velocityA : velocityB
+        uniforms.advectMode = 1
         encode(psAdvect) { enc in
             enc.setTexture(advVel,  index: 0)
             enc.setTexture(curCol,  index: 1)
@@ -298,7 +390,7 @@ final class FluidSimulator {
         }
         colorPing.toggle()
 
-        // 6b. Advect density
+        // 6b. Advect density — same extrude mode
         let nextDen = denPing ? densityB : densityA
         let curDen2 = denPing ? densityA : densityB
         encode(psAdvect) { enc in

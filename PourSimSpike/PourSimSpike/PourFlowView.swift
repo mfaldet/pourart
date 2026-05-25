@@ -22,6 +22,7 @@ struct PourFlowView: View {
             CanvasContainerView(
                 paletteStore: paletteStore,
                 consistency: avgConsistency,
+                canvasShape: canvasShape,
                 onExit: onDone
             )
         } else {

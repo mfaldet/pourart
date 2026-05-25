@@ -296,38 +296,28 @@ struct PaletteBuilderView: View {
     // MARK: - Custom mode
 
     private var customMode: some View {
-        VStack(spacing: 12) {
-            Text("Tap any swatch in the strip below to open the full color editor — adjust HSB, type a hex code, or pick a tint, shade, or tone.")
-                .font(.caption)
+        VStack(alignment: .leading, spacing: 8) {
+            Label("How to use Custom mode", systemImage: "info.circle")
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.55))
-                .padding(.horizontal, 20)
-
-            HStack(spacing: 14) {
-                Button {
-                    paletteSlots = ColorTools.randomPalette(harmony: harmony)
-                    lockedSlots.removeAll()
-                } label: {
-                    Label("Random All", systemImage: "die.face.5.fill")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(.white.opacity(0.1))
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
-
-                Button {
-                    lockedSlots.removeAll()
-                } label: {
-                    Label("Clear Locks", systemImage: "lock.open.fill")
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(.white.opacity(0.1))
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
-                }
+            VStack(alignment: .leading, spacing: 6) {
+                customBullet("Tap a swatch → full color editor (HSB, hex, tints, shades, tones)")
+                customBullet("Tap the 🔒 → lock a slot so Randomize / Match won't change it")
+                customBullet("Use the Adjust toolbar below to fine-tune the whole palette")
             }
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 20)
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.7))
+        }
+        .padding(14)
+        .background(.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 20)
+    }
+
+    private func customBullet(_ text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text("•").opacity(0.5)
+            Text(text)
         }
     }
 
@@ -382,32 +372,69 @@ struct PaletteBuilderView: View {
     }
 
     private var quickActions: some View {
-        HStack(spacing: 10) {
-            Button {
-                paletteSlots = ColorTools.randomPalette(harmony: harmony)
-                lockedSlots.removeAll()
-            } label: {
-                Label("Randomize", systemImage: "die.face.5.fill")
-                    .font(.caption.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(.white.opacity(0.12))
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+        VStack(alignment: .leading, spacing: 6) {
+            if !lockedSlots.isEmpty {
+                HStack(spacing: 4) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 9))
+                    Text("\(lockedSlots.count) locked — only unlocked slots will change")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .foregroundStyle(.yellow.opacity(0.8))
+                .padding(.horizontal, 22)
             }
-            Button {
-                lockedSlots.removeAll()
-            } label: {
-                Label("Clear Locks", systemImage: "lock.open.fill")
-                    .font(.caption.weight(.semibold))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(.white.opacity(0.12))
-                    .foregroundStyle(.white)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+            HStack(spacing: 8) {
+                QuickActionButton(label: "Randomize", icon: "die.face.5.fill") {
+                    randomizeUnlocked()
+                }
+                QuickActionButton(label: "Match",     icon: "wand.and.rays") {
+                    matchFromLocked()
+                }
+                QuickActionButton(label: "Clear Locks", icon: "lock.open.fill") {
+                    lockedSlots.removeAll()
+                }
             }
+            .padding(.horizontal, 20)
         }
-        .padding(.horizontal, 20)
+    }
+
+    // MARK: - Lock-aware fillers
+
+    private func randomizeUnlocked() {
+        let generated = ColorTools.randomPalette(harmony: harmony)
+        var next = paletteSlots
+        for i in 0..<5 where !lockedSlots.contains(i) {
+            next[i] = generated[i]
+        }
+        paletteSlots = next
+    }
+
+    /// Derive a hue from the locked colors, then fill unlocked slots
+    /// using the current harmony rule. Falls back to a pure random
+    /// fill if nothing is locked.
+    private func matchFromLocked() {
+        guard let firstLockedIdx = lockedSlots.sorted().first else {
+            randomizeUnlocked()
+            return
+        }
+        let base       = paletteSlots[firstLockedIdx]
+        let (h, s, b)  = ColorTools.hsb(from: base)
+        let generated  = harmony.paletteRGB(
+            hue:        h,
+            saturation: Swift.max(0.4, s),
+            brightness: Swift.max(0.5, b))
+
+        var next = paletteSlots
+        // Generated[firstLockedIdx] is the base color — assign the OTHER
+        // generated colors to unlocked positions in order.
+        var pool = generated.enumerated()
+            .filter { $0.offset != firstLockedIdx }
+            .map { $0.element }
+        for i in 0..<5 where !lockedSlots.contains(i) && !pool.isEmpty {
+            next[i] = pool.removeFirst()
+        }
+        paletteSlots = next
     }
 
     // MARK: - Palette-wide adjustments
@@ -419,32 +446,41 @@ struct PaletteBuilderView: View {
                 .foregroundStyle(.white.opacity(0.55))
                 .padding(.horizontal, 20)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    AdjustButton(label: "Cooler",     icon: "thermometer.snowflake", tint: .cyan) {
-                        applyToUnlocked { ColorTools.rotateHue($0, by: -20) }
-                    }
-                    AdjustButton(label: "Warmer",     icon: "thermometer.sun.fill", tint: .orange) {
+            HStack(spacing: 10) {
+                // Temperature rocker
+                PairedAdjustButton(
+                    top:    .init(label: "Warmer", icon: "thermometer.sun.fill",  tint: .orange) {
                         applyToUnlocked { ColorTools.rotateHue($0, by: 20) }
-                    }
-                    AdjustButton(label: "Lighten",    icon: "sun.max.fill", tint: .yellow) {
+                    },
+                    bottom: .init(label: "Cooler", icon: "thermometer.snowflake", tint: .cyan) {
+                        applyToUnlocked { ColorTools.rotateHue($0, by: -20) }
+                    })
+
+                // Brightness rocker
+                PairedAdjustButton(
+                    top:    .init(label: "Lighten", icon: "sun.max.fill", tint: .yellow) {
                         applyToUnlocked { ColorTools.adjustBrightness($0, by: 0.08) }
-                    }
-                    AdjustButton(label: "Darken",     icon: "moon.fill", tint: .indigo) {
+                    },
+                    bottom: .init(label: "Darken",  icon: "moon.fill",    tint: .indigo) {
                         applyToUnlocked { ColorTools.adjustBrightness($0, by: -0.08) }
-                    }
-                    AdjustButton(label: "Saturate",   icon: "drop.fill", tint: .pink) {
+                    })
+
+                // Saturation rocker
+                PairedAdjustButton(
+                    top:    .init(label: "Saturate",   icon: "drop.fill", tint: .pink) {
                         applyToUnlocked { ColorTools.adjustSaturation($0, by: 0.12) }
-                    }
-                    AdjustButton(label: "Desaturate", icon: "drop", tint: .gray) {
+                    },
+                    bottom: .init(label: "Desaturate", icon: "drop",      tint: .gray) {
                         applyToUnlocked { ColorTools.adjustSaturation($0, by: -0.12) }
-                    }
-                    AdjustButton(label: "Reverse",    icon: "arrow.left.arrow.right", tint: .white) {
+                    })
+
+                // Reorder — visually separate (not a rocker)
+                VStack(spacing: 6) {
+                    AdjustButton(label: "Reverse", icon: "arrow.left.arrow.right", tint: .white) {
                         paletteSlots.reverse()
-                        // Locks follow positions, not values — invert them too
                         lockedSlots = Set(lockedSlots.map { 4 - $0 })
                     }
-                    AdjustButton(label: "Shuffle",    icon: "shuffle", tint: .white) {
+                    AdjustButton(label: "Shuffle", icon: "shuffle", tint: .white) {
                         var slots = paletteSlots
                         let unlocked = (0..<5).filter { !lockedSlots.contains($0) }
                         let shuffled = unlocked.shuffled()
@@ -454,8 +490,8 @@ struct PaletteBuilderView: View {
                         paletteSlots = slots
                     }
                 }
-                .padding(.horizontal, 20)
             }
+            .padding(.horizontal, 20)
         }
     }
 
@@ -770,26 +806,90 @@ struct TemperatureLabel: View {
     }
 }
 
-struct AdjustButton: View {
-    let label: String
-    let icon:  String
-    let tint:  Color
+struct QuickActionButton: View {
+    let label:  String
+    let icon:   String
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 4) {
+            Label(label, systemImage: icon)
+                .font(.caption.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(.white.opacity(0.12))
+                .foregroundStyle(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+}
+
+// Config for one half of a PairedAdjustButton (or a standalone AdjustButton)
+struct AdjustConfig {
+    let label:  String
+    let icon:   String
+    let tint:   Color
+    let action: () -> Void
+}
+
+// A standalone "remote-style" pill — used for buttons that aren't part
+// of an attached pair (e.g. Reverse, Shuffle).
+struct AdjustButton: View {
+    let label:  String
+    let icon:   String
+    let tint:   Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
                 Image(systemName: icon)
                     .font(.system(size: 14, weight: .semibold))
                 Text(label)
                     .font(.system(size: 10, weight: .medium))
             }
             .foregroundStyle(tint)
-            .frame(width: 64, height: 52)
+            .frame(maxWidth: .infinity, minHeight: 52)
             .background(.white.opacity(0.08))
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10)
-                .stroke(tint.opacity(0.2), lineWidth: 1))
+                .stroke(tint.opacity(0.25), lineWidth: 1))
+        }
+    }
+}
+
+// Two buttons fused into a single capsule (a "rocker" like Volume+ / Volume-).
+// Inner divider visually attaches the two; the whole shape has one rounded
+// outline so the pair reads as related opposites.
+struct PairedAdjustButton: View {
+    let top:    AdjustConfig
+    let bottom: AdjustConfig
+
+    var body: some View {
+        VStack(spacing: 0) {
+            half(config: top)
+            Rectangle()
+                .fill(.white.opacity(0.18))
+                .frame(height: 1)
+            half(config: bottom)
+        }
+        .background(.white.opacity(0.08))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(.white.opacity(0.18), lineWidth: 1))
+    }
+
+    private func half(config: AdjustConfig) -> some View {
+        Button(action: config.action) {
+            VStack(spacing: 3) {
+                Image(systemName: config.icon)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(config.label)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(config.tint)
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .contentShape(Rectangle())
         }
     }
 }
