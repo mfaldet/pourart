@@ -128,7 +128,7 @@ final class FluidSimulator {
     func applyConsistency(_ value: Float) {
         let clamped = max(-1, min(1, value))
         uniforms.damping    = 0.94 - clamped * 0.04   // thin: 0.98 · thick: 0.90
-        uniforms.viscosity  = 0.0008 * pow(3.0, Double(clamped)) // thin: ~0.00027 · thick: ~0.0024
+        uniforms.viscosity  = 0.0008 * Float(pow(3.0, Double(clamped))) // thin: ~0.00027 · thick: ~0.0024
     }
 
     // Fill every grid cell with a solid base color.  Call once before the first frame.

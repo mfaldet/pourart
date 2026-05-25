@@ -2,184 +2,650 @@ import SwiftUI
 import simd
 
 // ---------------------------------------------------------------------------
-// PaletteBuilderView — Step 1: color science palette builder.
+// PaletteBuilderView — three-mode color palette builder.
+//
+// • Harmony — color wheel + harmony rules generate 5 colors automatically
+// • Image   — extract a palette from a photo
+// • Custom  — build slot by slot via the detail editor
+//
+// Slot state persists across mode switches. Lock icons preserve individual
+// slots when harmony / image extraction would overwrite them.
 // ---------------------------------------------------------------------------
 struct PaletteBuilderView: View {
     @ObservedObject var store: PaletteStore
 
+    // Builder mode
+    @State private var mode: BuilderMode = .harmony
+
+    // Harmony state
     @State private var hue:        Double = 0.6
     @State private var saturation: Double = 0.75
     @State private var brightness: Double = 0.90
     @State private var harmony:    ColorHarmony = .analogous
-    @State private var showPresets = false
 
-    private var generatedRGBs: [SIMD3<Float>] {
-        harmony.paletteRGB(hue: hue, saturation: saturation, brightness: brightness)
+    // Slot state — source of truth for the canvas palette
+    @State private var paletteSlots: [SIMD3<Float>] = Array(repeating: SIMD3(1, 1, 1), count: 5)
+    @State private var lockedSlots:  Set<Int>       = []
+
+    // Image mode
+    @State private var sourceImage:    UIImage? = nil
+    @State private var showPhotoPicker         = false
+
+    // Slot editor (long-press a slot)
+    @State private var editingSlot: Int? = nil
+
+    // Save palette sheet
+    @State private var showSaveSheet   = false
+    @State private var saveName        = ""
+
+    // Preset picker (Load button)
+    @State private var showPresets     = false
+
+    enum BuilderMode: String, CaseIterable, Identifiable {
+        case harmony, image, custom
+        var id: String { rawValue }
+        var label: String {
+            switch self {
+            case .harmony: return "Harmony"
+            case .image:   return "Image"
+            case .custom:  return "Custom"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .harmony: return "circle.hexagongrid.fill"
+            case .image:   return "photo.fill"
+            case .custom:  return "paintbrush.pointed.fill"
+            }
+        }
     }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
+            VStack(alignment: .leading, spacing: 22) {
 
-                // Header
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Build Your Palette")
-                        .font(.title.bold())
-                        .foregroundStyle(.white)
-                    Text("Pick a base color and a harmony to generate 5 paint colors.")
-                        .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.55))
+                header
+                modeTabs
+
+                Group {
+                    switch mode {
+                    case .harmony: harmonyMode
+                    case .image:   imageMode
+                    case .custom:  customMode
+                    }
                 }
-                .padding(.horizontal, 24)
 
-                // Harmony picker
-                harmonySection
+                // Always-visible slot strip & actions
+                slotStrip
 
-                // Color wheel + sliders
-                wheelSection
+                quickActions
 
-                // Generated palette swatches
-                palettePreview
+                paletteAdjustToolbar
 
-                // Color science info card
+                colorBlindnessPreview
+
                 ScienceInfoCard(harmony: harmony)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
             }
             .padding(.top, 24)
             .padding(.bottom, 32)
         }
-        .onChange(of: hue)        { _, _ in syncToStore() }
-        .onChange(of: saturation) { _, _ in syncToStore() }
-        .onChange(of: brightness) { _, _ in syncToStore() }
-        .onChange(of: harmony)    { _, _ in syncToStore() }
-        .onAppear { syncToStore() }
+        .onAppear { regenerateUnlocked() }
+        .onChange(of: hue)        { _, _ in if mode == .harmony { regenerateUnlocked() } }
+        .onChange(of: saturation) { _, _ in if mode == .harmony { regenerateUnlocked() } }
+        .onChange(of: brightness) { _, _ in if mode == .harmony { regenerateUnlocked() } }
+        .onChange(of: harmony)    { _, _ in if mode == .harmony { regenerateUnlocked() } }
+        .onChange(of: paletteSlots) { _, _ in syncToStore() }
+        .onChange(of: sourceImage) { _, img in
+            if let img { extractFromImage(img) }
+        }
+        // Sheets
+        .sheet(item: Binding(
+            get: { editingSlot.map { SlotIndex(index: $0) } },
+            set: { editingSlot = $0?.index }
+        )) { idx in
+            PaletteSlotEditor(rgb: slotBinding(for: idx.index))
+                .presentationDetents([.large])
+        }
+        .sheet(isPresented: $showPhotoPicker) {
+            PhotoPickerSheet(image: $sourceImage)
+        }
+        .sheet(isPresented: $showSaveSheet) {
+            SavePaletteSheet(name: $saveName) { name in
+                let colors = paletteSlots.enumerated().map { i, rgb in
+                    PaletteColor(name: "Color \(i+1)", rgb: rgb)
+                }
+                store.savePalette(name: name, colors: colors)
+                saveName = ""
+            }
+            .presentationDetents([.height(220)])
+        }
         .sheet(isPresented: $showPresets) {
             PalettePickerView(store: store, onSelect: nil)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
+                .onDisappear {
+                    // Pull active palette into slots
+                    paletteSlots = store.activePalette.colors.map(\.rgb)
+                    lockedSlots.removeAll()
+                }
         }
     }
 
-    // MARK: - Sections
+    // MARK: - Header / mode tabs
 
-    private var harmonySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Color Harmony")
-                .font(.headline)
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Build Your Palette")
+                .font(.title.bold())
                 .foregroundStyle(.white)
-                .padding(.horizontal, 24)
+            Text("Tap a slot to edit · Tap the lock to pin a color in place.")
+                .font(.subheadline)
+                .foregroundStyle(.white.opacity(0.55))
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var modeTabs: some View {
+        HStack(spacing: 0) {
+            ForEach(BuilderMode.allCases) { m in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { mode = m }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: m.icon)
+                        Text(m.label)
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(mode == m ? Color.white.opacity(0.16) : Color.clear)
+                    .foregroundStyle(mode == m ? .white : .white.opacity(0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }
+        }
+        .padding(4)
+        .background(.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .padding(.horizontal, 20)
+    }
+
+    // MARK: - Harmony mode
+
+    private var harmonyMode: some View {
+        VStack(spacing: 18) {
+            // Harmony chips
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Harmony")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 20)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(ColorHarmony.allCases) { h in
+                            HarmonyChip(harmony: h, isSelected: harmony == h)
+                                .onTapGesture { harmony = h }
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                }
+                Text(harmony.description)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.5))
+                    .padding(.horizontal, 20)
+            }
+
+            // Wheel + sliders
+            VStack(spacing: 14) {
+                ColorWheelPicker(hue: $hue, saturation: $saturation)
+                    .frame(maxWidth: 240)
+                    .frame(maxWidth: .infinity)
+
+                VStack(spacing: 10) {
+                    LabeledSlider(label: "Brightness", value: $brightness, range: 0.2...1.0,
+                                  tint: Color(hue: hue, saturation: saturation, brightness: brightness),
+                                  format: { "\(Int($0 * 100))%" })
+                    LabeledSlider(label: "Saturation", value: $saturation, range: 0.0...1.0,
+                                  tint: Color(hue: hue, saturation: saturation, brightness: 0.9),
+                                  format: { "\(Int($0 * 100))%" })
+                }
+                .padding(.horizontal, 20)
+
+                HStack(spacing: 16) {
+                    TemperatureLabel(hue: hue)
+                    Spacer()
+                    Text("Hue \(Int(hue * 360))°")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.4))
+                }
+                .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    // MARK: - Image mode
+
+    private var imageMode: some View {
+        VStack(spacing: 16) {
+            Text("Pour artists often draw color inspiration from photos — sunsets, gardens, vintage prints. Pick an image to extract its colors automatically.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.horizontal, 20)
+
+            if let img = sourceImage {
+                Image(uiImage: img)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity, maxHeight: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14)
+                        .stroke(.white.opacity(0.1)))
+                    .padding(.horizontal, 20)
+
+                HStack(spacing: 12) {
+                    Button {
+                        showPhotoPicker = true
+                    } label: {
+                        Label("Choose Different", systemImage: "photo")
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(.white.opacity(0.1))
+                            .foregroundStyle(.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+
+                    Button {
+                        if let img = sourceImage { extractFromImage(img) }
+                    } label: {
+                        Label("Re-extract", systemImage: "wand.and.stars")
+                            .font(.subheadline.weight(.medium))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(.white)
+                            .foregroundStyle(.black)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                    }
+                }
+                .padding(.horizontal, 20)
+            } else {
+                Button {
+                    showPhotoPicker = true
+                } label: {
+                    VStack(spacing: 10) {
+                        Image(systemName: "photo.fill.on.rectangle.fill")
+                            .font(.system(size: 36))
+                        Text("Pick a Photo")
+                            .font(.headline)
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity, minHeight: 160)
+                    .background(.white.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14)
+                        .strokeBorder(style: StrokeStyle(lineWidth: 1.5, dash: [6, 4]))
+                        .foregroundStyle(.white.opacity(0.2)))
+                }
+                .padding(.horizontal, 20)
+            }
+        }
+    }
+
+    // MARK: - Custom mode
+
+    private var customMode: some View {
+        VStack(spacing: 12) {
+            Text("Tap any swatch in the strip below to open the full color editor — adjust HSB, type a hex code, or pick a tint, shade, or tone.")
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.horizontal, 20)
+
+            HStack(spacing: 14) {
+                Button {
+                    paletteSlots = ColorTools.randomPalette(harmony: harmony)
+                    lockedSlots.removeAll()
+                } label: {
+                    Label("Random All", systemImage: "die.face.5.fill")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(.white.opacity(0.1))
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+
+                Button {
+                    lockedSlots.removeAll()
+                } label: {
+                    Label("Clear Locks", systemImage: "lock.open.fill")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(.white.opacity(0.1))
+                        .foregroundStyle(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 20)
+        }
+    }
+
+    // MARK: - Slot strip (always visible)
+
+    private var slotStrip: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Your Palette")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                Button {
+                    showPresets = true
+                } label: {
+                    Label("Load", systemImage: "tray.and.arrow.down.fill")
+                        .font(.caption.weight(.semibold))
+                }
+                .tint(.white.opacity(0.6))
+                Button {
+                    UIPasteboard.general.string = paletteSlots
+                        .map { ColorTools.hex($0) }
+                        .joined(separator: " ")
+                } label: {
+                    Label("Copy", systemImage: "doc.on.doc")
+                        .font(.caption.weight(.semibold))
+                }
+                .tint(.white.opacity(0.6))
+                Button {
+                    showSaveSheet = true
+                } label: {
+                    Label("Save", systemImage: "bookmark.fill")
+                        .font(.caption.weight(.semibold))
+                }
+                .tint(.white.opacity(0.6))
+            }
+            .padding(.horizontal, 20)
+
+            HStack(spacing: 6) {
+                ForEach(0..<5, id: \.self) { i in
+                    SlotCell(
+                        rgb: paletteSlots[i],
+                        isLocked: lockedSlots.contains(i),
+                        onTap:    { editingSlot = i },
+                        onLock:   { toggleLock(i) }
+                    )
+                }
+            }
+            .padding(.horizontal, 20)
+        }
+        .padding(.top, 8)
+    }
+
+    private var quickActions: some View {
+        HStack(spacing: 10) {
+            Button {
+                paletteSlots = ColorTools.randomPalette(harmony: harmony)
+                lockedSlots.removeAll()
+            } label: {
+                Label("Randomize", systemImage: "die.face.5.fill")
+                    .font(.caption.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(.white.opacity(0.12))
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+            Button {
+                lockedSlots.removeAll()
+            } label: {
+                Label("Clear Locks", systemImage: "lock.open.fill")
+                    .font(.caption.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(.white.opacity(0.12))
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+        }
+        .padding(.horizontal, 20)
+    }
+
+    // MARK: - Palette-wide adjustments
+
+    private var paletteAdjustToolbar: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Adjust Whole Palette")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.55))
+                .padding(.horizontal, 20)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    ForEach(ColorHarmony.allCases) { h in
-                        HarmonyChip(harmony: h, isSelected: harmony == h)
-                            .onTapGesture { harmony = h }
+                    AdjustButton(label: "Cooler",     icon: "thermometer.snowflake", tint: .cyan) {
+                        applyToUnlocked { ColorTools.rotateHue($0, by: -20) }
                     }
-                }
-                .padding(.horizontal, 24)
-            }
-
-            Text(harmony.description)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.5))
-                .padding(.horizontal, 24)
-        }
-    }
-
-    private var wheelSection: some View {
-        VStack(spacing: 20) {
-            ColorWheelPicker(hue: $hue, saturation: $saturation)
-                .frame(maxWidth: 260)
-                .frame(maxWidth: .infinity)
-
-            VStack(spacing: 14) {
-                // Brightness
-                LabeledSlider(label: "Brightness",
-                              value: $brightness, range: 0.2...1.0,
-                              tint: Color(hue: hue, saturation: saturation, brightness: brightness),
-                              format: { "\(Int($0 * 100))%" })
-                // Saturation
-                LabeledSlider(label: "Saturation",
-                              value: $saturation, range: 0.0...1.0,
-                              tint: Color(hue: hue, saturation: saturation, brightness: 0.9),
-                              format: { "\(Int($0 * 100))%" })
-            }
-            .padding(.horizontal, 24)
-
-            // Temperature & hue info row
-            HStack(spacing: 16) {
-                TemperatureLabel(hue: hue)
-                Spacer()
-                Text("Hue \(Int(hue * 360))°")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.45))
-            }
-            .padding(.horizontal, 24)
-        }
-    }
-
-    private var palettePreview: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Your Palette")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Spacer()
-                Button("Load Preset") { showPresets = true }
-                    .font(.caption.weight(.medium))
-                    .tint(.white.opacity(0.55))
-            }
-            .padding(.horizontal, 24)
-
-            // 5-swatch bar
-            HStack(spacing: 0) {
-                ForEach(Array(generatedRGBs.enumerated()), id: \.offset) { i, rgb in
-                    Color(red: Double(rgb.x), green: Double(rgb.y), blue: Double(rgb.z))
-                        .frame(maxWidth: .infinity, minHeight: 72)
-                        .overlay(alignment: .bottomLeading) {
-                            Text("\(i+1)")
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.white.opacity(0.6))
-                                .padding(6)
+                    AdjustButton(label: "Warmer",     icon: "thermometer.sun.fill", tint: .orange) {
+                        applyToUnlocked { ColorTools.rotateHue($0, by: 20) }
+                    }
+                    AdjustButton(label: "Lighten",    icon: "sun.max.fill", tint: .yellow) {
+                        applyToUnlocked { ColorTools.adjustBrightness($0, by: 0.08) }
+                    }
+                    AdjustButton(label: "Darken",     icon: "moon.fill", tint: .indigo) {
+                        applyToUnlocked { ColorTools.adjustBrightness($0, by: -0.08) }
+                    }
+                    AdjustButton(label: "Saturate",   icon: "drop.fill", tint: .pink) {
+                        applyToUnlocked { ColorTools.adjustSaturation($0, by: 0.12) }
+                    }
+                    AdjustButton(label: "Desaturate", icon: "drop", tint: .gray) {
+                        applyToUnlocked { ColorTools.adjustSaturation($0, by: -0.12) }
+                    }
+                    AdjustButton(label: "Reverse",    icon: "arrow.left.arrow.right", tint: .white) {
+                        paletteSlots.reverse()
+                        // Locks follow positions, not values — invert them too
+                        lockedSlots = Set(lockedSlots.map { 4 - $0 })
+                    }
+                    AdjustButton(label: "Shuffle",    icon: "shuffle", tint: .white) {
+                        var slots = paletteSlots
+                        let unlocked = (0..<5).filter { !lockedSlots.contains($0) }
+                        let shuffled = unlocked.shuffled()
+                        for (i, dest) in unlocked.enumerated() {
+                            slots[dest] = paletteSlots[shuffled[i]]
                         }
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.1)))
-            .padding(.horizontal, 24)
-
-            // Individual color values
-            HStack(spacing: 0) {
-                ForEach(Array(generatedRGBs.enumerated()), id: \.offset) { _, rgb in
-                    let hsb = rgbToHSB(rgb)
-                    VStack(spacing: 2) {
-                        Text("\(Int(hsb.h * 360))°")
-                            .font(.system(size: 9, weight: .medium).monospacedDigit())
-                            .foregroundStyle(.white.opacity(0.5))
+                        paletteSlots = slots
                     }
-                    .frame(maxWidth: .infinity)
                 }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 24)
         }
     }
 
-    // MARK: - Helpers
+    private var colorBlindnessPreview: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Label("Accessibility Preview", systemImage: "eye.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.55))
+                Spacer()
+                Text("how others see your palette")
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.3))
+            }
+            .padding(.horizontal, 20)
+
+            VStack(spacing: 6) {
+                ForEach(ColorBlindness.allCases) { type in
+                    HStack(spacing: 8) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(type.label)
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.8))
+                            Text(type.subtitle)
+                                .font(.system(size: 9))
+                                .foregroundStyle(.white.opacity(0.4))
+                        }
+                        .frame(width: 96, alignment: .leading)
+
+                        HStack(spacing: 2) {
+                            ForEach(0..<5, id: \.self) { i in
+                                let simulated = ColorTools.simulate(paletteSlots[i], type: type)
+                                Color(red: Double(simulated.x),
+                                      green: Double(simulated.y),
+                                      blue: Double(simulated.z))
+                                    .frame(maxWidth: .infinity, minHeight: 26)
+                            }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+        }
+    }
+
+    private func applyToUnlocked(_ transform: (SIMD3<Float>) -> SIMD3<Float>) {
+        var next = paletteSlots
+        for i in 0..<5 where !lockedSlots.contains(i) {
+            next[i] = transform(paletteSlots[i])
+        }
+        paletteSlots = next
+    }
+
+    // MARK: - Actions
+
+    private func regenerateUnlocked() {
+        let generated = harmony.paletteRGB(hue: hue, saturation: saturation, brightness: brightness)
+        var next = paletteSlots
+        if next.count < 5 { next = generated }
+        for i in 0..<5 where !lockedSlots.contains(i) {
+            next[i] = generated[i]
+        }
+        if next != paletteSlots { paletteSlots = next }
+    }
+
+    private func toggleLock(_ i: Int) {
+        if lockedSlots.contains(i) { lockedSlots.remove(i) }
+        else                        { lockedSlots.insert(i) }
+    }
+
+    private func extractFromImage(_ image: UIImage) {
+        let extracted = ColorTools.extractPalette(from: image, count: 5)
+        guard extracted.count == 5 else { return }
+        var next = paletteSlots
+        for i in 0..<5 where !lockedSlots.contains(i) {
+            next[i] = extracted[i]
+        }
+        paletteSlots = next
+    }
 
     private func syncToStore() {
-        let rgbs = generatedRGBs
-        let colors = rgbs.enumerated().map { i, rgb in
+        let colors = paletteSlots.enumerated().map { i, rgb in
             PaletteColor(name: "Color \(i+1)", rgb: rgb)
         }
         store.setCustomColors(colors)
     }
 
-    private func rgbToHSB(_ rgb: SIMD3<Float>) -> (h: Double, s: Double, b: Double) {
-        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0
-        UIColor(red: CGFloat(rgb.x), green: CGFloat(rgb.y), blue: CGFloat(rgb.z), alpha: 1)
-            .getHue(&h, saturation: &s, brightness: &b, alpha: nil)
-        return (Double(h), Double(s), Double(b))
+    private func slotBinding(for index: Int) -> Binding<SIMD3<Float>> {
+        Binding(
+            get: { paletteSlots[index] },
+            set: {
+                paletteSlots[index] = $0
+                lockedSlots.insert(index)   // editing locks the slot
+            }
+        )
     }
+}
+
+// ---------------------------------------------------------------------------
+// SlotCell — one swatch in the palette strip.
+// ---------------------------------------------------------------------------
+private struct SlotCell: View {
+    let rgb:      SIMD3<Float>
+    let isLocked: Bool
+    let onTap:    () -> Void
+    let onLock:   () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            VStack(spacing: 0) {
+                Color(red: Double(rgb.x), green: Double(rgb.y), blue: Double(rgb.z))
+                    .frame(height: 78)
+                Text(ColorTools.hex(rgb))
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.85))
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity)
+                    .background(.black)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(.white.opacity(0.15), lineWidth: 1))
+            .onTapGesture { onTap() }
+
+            Button(action: onLock) {
+                Image(systemName: isLocked ? "lock.fill" : "lock.open")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(isLocked ? .black : .white)
+                    .padding(5)
+                    .background(isLocked ? Color.yellow : Color.black.opacity(0.55))
+                    .clipShape(Circle())
+            }
+            .padding(5)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SavePaletteSheet — name your custom palette and save it.
+// ---------------------------------------------------------------------------
+private struct SavePaletteSheet: View {
+    @Binding var name: String
+    var onSave: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                TextField("Palette name", text: $name)
+                    .textInputAutocapitalization(.words)
+                    .padding(12)
+                    .background(.white.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                Button {
+                    onSave(name)
+                    dismiss()
+                } label: {
+                    Text("Save")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(name.trimmingCharacters(in: .whitespaces).isEmpty
+                                    ? Color.gray
+                                    : Color.white)
+                        .foregroundStyle(.black)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                Spacer()
+            }
+            .padding(20)
+            .navigationTitle("Save Palette")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+// Identifiable wrapper for .sheet(item:) over Int
+private struct SlotIndex: Identifiable {
+    let index: Int
+    var id: Int { index }
 }
 
 // ---------------------------------------------------------------------------
@@ -201,16 +667,12 @@ struct ColorWheelPicker: View {
             let radius = size / 2
 
             ZStack {
-                // Hue ring
                 Circle().fill(AngularGradient(colors: hueColors, center: .center))
-                // Saturation fade (white center = zero saturation)
                 Circle().fill(RadialGradient(
                     colors: [.white, .clear],
                     center: .center, startRadius: 0, endRadius: radius))
-                // Dark rim for contrast
                 Circle().stroke(.black.opacity(0.15), lineWidth: 1.5)
 
-                // Cursor
                 let angle = hue * 2 * .pi
                 let r     = saturation * radius
                 Circle()
@@ -237,12 +699,11 @@ struct ColorWheelPicker: View {
 }
 
 // ---------------------------------------------------------------------------
-// Supporting views
+// Reusable bits
 // ---------------------------------------------------------------------------
 struct HarmonyChip: View {
     let harmony:    ColorHarmony
     let isSelected: Bool
-
     var body: some View {
         Text(harmony.label)
             .font(.caption.weight(.semibold))
@@ -258,7 +719,7 @@ struct LabeledSlider: View {
     let label: String
     @Binding var value: Double
     let range: ClosedRange<Double>
-    let tint: Color
+    let tint:  Color
     let format: (Double) -> String
 
     var body: some View {
@@ -279,7 +740,6 @@ struct LabeledSlider: View {
 
 struct TemperatureLabel: View {
     let hue: Double
-
     private var label: String {
         switch hue {
         case 0..<0.08, 0.92...: return "Very Warm"
@@ -291,7 +751,6 @@ struct TemperatureLabel: View {
         default:                return "Cool"
         }
     }
-
     private var labelColor: Color {
         switch label {
         case "Very Warm": return .orange
@@ -301,7 +760,6 @@ struct TemperatureLabel: View {
         default:          return .white.opacity(0.6)
         }
     }
-
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "thermometer.medium")
@@ -312,9 +770,32 @@ struct TemperatureLabel: View {
     }
 }
 
+struct AdjustButton: View {
+    let label: String
+    let icon:  String
+    let tint:  Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 10, weight: .medium))
+            }
+            .foregroundStyle(tint)
+            .frame(width: 64, height: 52)
+            .background(.white.opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(tint.opacity(0.2), lineWidth: 1))
+        }
+    }
+}
+
 struct ScienceInfoCard: View {
     let harmony: ColorHarmony
-
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Color Science", systemImage: "info.circle")

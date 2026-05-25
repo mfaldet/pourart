@@ -16,6 +16,10 @@
 		AA000007000000000000AA01 /* IntentionView.swift in Sources */  = {isa = PBXBuildFile; fileRef = AA000007000000000000AA00 /* IntentionView.swift */; };
 		AA000008000000000000AA01 /* PaletteBuilderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000008000000000000AA00 /* PaletteBuilderView.swift */; };
 		AA000009000000000000AA01 /* PaintSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA000009000000000000AA00 /* PaintSetupView.swift */; };
+		AA00000A000000000000AA01 /* ColorTools.swift in Sources */        = {isa = PBXBuildFile; fileRef = AA00000A000000000000AA00 /* ColorTools.swift */; };
+		AA00000B000000000000AA01 /* PalettePresets.swift in Sources */    = {isa = PBXBuildFile; fileRef = AA00000B000000000000AA00 /* PalettePresets.swift */; };
+		AA00000C000000000000AA01 /* PaletteSlotEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA00000C000000000000AA00 /* PaletteSlotEditor.swift */; };
+		AA00000D000000000000AA01 /* PhotoPickerSheet.swift in Sources */  = {isa = PBXBuildFile; fileRef = AA00000D000000000000AA00 /* PhotoPickerSheet.swift */; };
 		3F931C8B63F6EB878FB943D1 /* MotionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 037D72E36C502513A00BA528 /* MotionService.swift */; };
 		9B959009038950FD9869BF53 /* FluidSimulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A4CB7B28854151ADCFA4BF4 /* FluidSimulator.swift */; };
 		A1B64646D31074EAB5B62EDF /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D24C739A9C03118E2648080A /* ContentView.swift */; };
@@ -44,6 +48,10 @@
 		AA000007000000000000AA00 /* IntentionView.swift */      = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntentionView.swift;      sourceTree = "<group>"; };
 		AA000008000000000000AA00 /* PaletteBuilderView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteBuilderView.swift; sourceTree = "<group>"; };
 		AA000009000000000000AA00 /* PaintSetupView.swift */     = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaintSetupView.swift;     sourceTree = "<group>"; };
+		AA00000A000000000000AA00 /* ColorTools.swift */         = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorTools.swift;         sourceTree = "<group>"; };
+		AA00000B000000000000AA00 /* PalettePresets.swift */     = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PalettePresets.swift;     sourceTree = "<group>"; };
+		AA00000C000000000000AA00 /* PaletteSlotEditor.swift */  = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaletteSlotEditor.swift;  sourceTree = "<group>"; };
+		AA00000D000000000000AA00 /* PhotoPickerSheet.swift */   = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoPickerSheet.swift;   sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -68,6 +76,10 @@
 				AA000007000000000000AA00 /* IntentionView.swift */,
 				AA000008000000000000AA00 /* PaletteBuilderView.swift */,
 				AA000009000000000000AA00 /* PaintSetupView.swift */,
+				AA00000A000000000000AA00 /* ColorTools.swift */,
+				AA00000B000000000000AA00 /* PalettePresets.swift */,
+				AA00000C000000000000AA00 /* PaletteSlotEditor.swift */,
+				AA00000D000000000000AA00 /* PhotoPickerSheet.swift */,
 				D24C739A9C03118E2648080A /* ContentView.swift */,
 				2A4CB7B28854151ADCFA4BF4 /* FluidSimulator.swift */,
 				685AFB157EECECC1F119B39E /* Info.plist */,
@@ -164,6 +176,10 @@
 				AA000007000000000000AA01 /* IntentionView.swift in Sources */,
 				AA000008000000000000AA01 /* PaletteBuilderView.swift in Sources */,
 				AA000009000000000000AA01 /* PaintSetupView.swift in Sources */,
+				AA00000A000000000000AA01 /* ColorTools.swift in Sources */,
+				AA00000B000000000000AA01 /* PalettePresets.swift in Sources */,
+				AA00000C000000000000AA01 /* PaletteSlotEditor.swift in Sources */,
+				AA00000D000000000000AA01 /* PhotoPickerSheet.swift in Sources */,
 				D5E52D8C9F1B8EBF3BCC76A3 /* PourSimSpikeApp.swift in Sources */,
 				A2F0E656207918BF8369CF9A /* Renderer.swift in Sources */,
 				FD19302C0E6C9CB75E803364 /* Shaders.metal in Sources */,

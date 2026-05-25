@@ -375,14 +375,31 @@ struct ToolbarView: View {
 // ---------------------------------------------------------------------------
 struct PalettePickerView: View {
     @ObservedObject var store: PaletteStore
-    var onSelect: (() -> Void)?   // optional: called after picking (from home screen)
+    var onSelect: (() -> Void)?
     @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedCategory: PaletteCategory = .classic
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    ForEach(Palette.all) { palette in
+            VStack(spacing: 0) {
+                // Category chips
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(visibleCategories, id: \.self) { cat in
+                            CategoryChip(category: cat,
+                                         isSelected: selectedCategory == cat)
+                                .onTapGesture { selectedCategory = cat }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+                .background(Color.black.opacity(0.001))
+                Divider().background(Color.white.opacity(0.1))
+
+                List {
+                    ForEach(palettesInCurrentCategory) { palette in
                         PaletteRowView(palette: palette,
                                        isSelected: store.activePalette.name == palette.name)
                             .contentShape(Rectangle())
@@ -391,34 +408,41 @@ struct PalettePickerView: View {
                                 dismiss()
                                 onSelect?()
                             }
-                    }
-                } header: {
-                    Text("Presets")
-                }
-
-                if !store.recentColors.isEmpty {
-                    Section {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 10) {
-                                ForEach(store.recentColors) { color in
-                                    Circle()
-                                        .fill(color.displayColor)
-                                        .frame(width: 38, height: 38)
-                                        .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 1))
-                                        .onTapGesture {
-                                            // Replace the currently selected slot with this recent color
-                                            store.activePalette.colors[store.activeColorIndex] = color
-                                            dismiss()
-                                            onSelect?()
-                                        }
+                            .swipeActions(edge: .trailing) {
+                                if palette.category == .custom {
+                                    Button(role: .destructive) {
+                                        store.deleteSavedPalette(palette)
+                                    } label: {
+                                        Label("Delete", systemImage: "trash")
+                                    }
                                 }
                             }
-                            .padding(.vertical, 6)
+                    }
+
+                    if !store.recentColors.isEmpty && selectedCategory == .classic {
+                        Section {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    ForEach(store.recentColors) { color in
+                                        Circle()
+                                            .fill(color.displayColor)
+                                            .frame(width: 38, height: 38)
+                                            .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 1))
+                                            .onTapGesture {
+                                                store.activePalette.colors[store.activeColorIndex] = color
+                                                dismiss()
+                                                onSelect?()
+                                            }
+                                    }
+                                }
+                                .padding(.vertical, 6)
+                            }
+                        } header: {
+                            Text("Recent Colors")
                         }
-                    } header: {
-                        Text("Recent Colors")
                     }
                 }
+                .listStyle(.insetGrouped)
             }
             .navigationTitle("Palettes")
             .navigationBarTitleDisplayMode(.inline)
@@ -429,6 +453,35 @@ struct PalettePickerView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    private var visibleCategories: [PaletteCategory] {
+        var cats = PaletteCategory.allCases.filter { $0 != .custom }
+        if !store.savedPalettes.isEmpty { cats.append(.custom) }
+        return cats
+    }
+
+    private var palettesInCurrentCategory: [Palette] {
+        if selectedCategory == .custom { return store.savedPalettes }
+        return Palette.library.filter { $0.category == selectedCategory }
+    }
+}
+
+private struct CategoryChip: View {
+    let category:   PaletteCategory
+    let isSelected: Bool
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: category.icon)
+                .font(.system(size: 11, weight: .semibold))
+            Text(category.label)
+                .font(.caption.weight(.semibold))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(isSelected ? Color.white : Color.white.opacity(0.1))
+        .foregroundStyle(isSelected ? Color.black : Color.white)
+        .clipShape(Capsule())
     }
 }
 
